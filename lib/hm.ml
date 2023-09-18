@@ -52,7 +52,6 @@ module HM () = struct
   and bind =
     | VarBind of ty
     | TypeBind of ty
-    | TyVarBind of ty (* for type annotations *)
 
   and env = (id * bind) list
 
