@@ -201,10 +201,8 @@ module HM () = struct
         (* Grab src and tgt's levels. *)
         let (Unbound (_, src_lvl)) = !src in
         let (Unbound (id, tgt_lvl)) = !tgt in
-
         (* Compute the minimum of their levels (the outermost scope). *)
         let min_lvl = min src_lvl tgt_lvl in
-
         (* Update the tgt's level to be the minimum. *)
         tgt := Unbound (id, min_lvl)
     | TArrow (from, dst) ->
@@ -231,7 +229,6 @@ module HM () = struct
         (* If either type is a type variable, ensure that the type variable does
            not occur in the type. Update the levels while you're at it. *)
         occurs tv ty;
-
         (* Link the type variable to the type. *)
         tv := Link ty
     | TArrow (f1, d1), TArrow (f2, d2) ->
@@ -245,7 +242,6 @@ module HM () = struct
         let unify_fld (id1, ty1) (id2, ty2) =
           if id1 <> id2 then raise (fail_unify ty1 ty2) else unify ty1 ty2
         in
-
         (* Unify their corresponding fields. *)
         List.iter2 unify_fld fds1 fds2
     | _ ->
@@ -269,7 +265,6 @@ module HM () = struct
     | EVar name ->
         (* Variable is being used. Look up its type in the environment, *)
         let var_ty = lookup_var_type name env in
-
         (* instantiate its type by replacing all of its quantified type
            variables with fresh unbound type variables.*)
         TEVar (name, inst var_ty)
@@ -278,16 +273,13 @@ module HM () = struct
            function and the argument. *)
         let fn = infer env fn in
         let arg = infer env arg in
-
         (* Instantiate a fresh type variable for the result of the application,
            and synthesize an arrow type going from the argument to the
            result. *)
         let ty_res = fresh_unbound_var () in
         let ty_arr = TArrow (typ arg, ty_res) in
-
         (* Unify it with the function's type. *)
         unify (typ fn) ty_arr;
-
         (* Return the result type. *)
         TEApp (fn, arg, ty_res)
     | ELam (param, body) ->
@@ -295,28 +287,22 @@ module HM () = struct
            extend the environment with the param and its type. *)
         let ty_param = fresh_unbound_var () in
         let env' = (param, VarBind ty_param) :: env in
-
         (* Typecheck the body of the lambda with the extended environment. *)
         let body = infer env' body in
-
         (* Return a synthesized arrow type from the parameter to the body. *)
         TELam (param, body, TArrow (ty_param, typ body))
     | ERecord (tname, rec_lit) ->
         (* TODO: annotated record types? *)
         (* Look up the declared type for the type name on the record literal. *)
         let ty_dec = lookup_type tname env in
-
         (* Infer the types of all the fields in the literal. *)
         let rec_lit = List.map (fun (id, x) -> (id, infer env x)) rec_lit in
-
         (* Synthesize a record type with the types of those fields. *)
         let ty_rec =
           TRecord (tname, List.map (fun (id, x) -> (id, typ x)) rec_lit)
         in
-
         (* Unify that with the declared type. *)
         unify ty_dec ty_rec;
-
         (* Return the record's type. *)
         TERecord (tname, rec_lit, ty_dec)
     | EProj (rcd, fld) -> (
@@ -335,46 +321,38 @@ module HM () = struct
         (* Check that the type of condition is Bool. *)
         let cond = infer env cond in
         unify (typ cond) TBool;
-
         (* Check that the types of the branches are equal to each other. *)
         let thn = infer env thn in
         let els = infer env els in
         unify (typ thn) (typ els);
-
         (* Return the type of one of the branches. (we'll pick the "then"
            branch) *)
         TEIf (cond, thn, els, typ thn)
     | ELet ((id, ann, rhs), body) ->
         (* Increment the nesting level at this let binding. *)
         enter_level ();
-
         (* If there's a type annotation on this let binding, reify it. *)
         let ty_rhs = reify_ann env ann in
         (* Infer the type of the right-hand-side. *)
         let rhs = infer env rhs in
         (* Unify it with the annotated type. *)
         unify ty_rhs (typ rhs);
-
         (* Decrement the nesting level after this let binding. *)
         leave_level ();
-
         (* Generalize the type of the inferred binding, and it to our
            environment. Only type variables at a deeper level are
            generalized. *)
         let ty_gen = gen ty_rhs in
         let env = (id, VarBind ty_gen) :: env in
-
         (* Typecheck the body of the let binding and return up its type. *)
         let body = infer env body in
         TELet ((id, ann, rhs), body, typ body)
     | ELetRec (decls, body) ->
         (* Increment the nesting level at this recursive let binding. *)
         enter_level ();
-
         (* Use this hash table to keep track of duplicate definitions in the
            recursive let. *)
         let deduped_defs : (id, unit) Hashtbl.t = Hashtbl.create 0 in
-
         (* Extend environment with the declarations in the recursive let binding
            and check for duplicates. *)
         let extend_env (id, ann, _) env' =
@@ -391,7 +369,6 @@ module HM () = struct
               (id, VarBind ty_decl) :: env'
         in
         let env' = List.fold_right extend_env decls env in
-
         (* Using the extended environment, infer the types of the
            right-hand-side of all the let declarations. *)
         let infer_let (id, VarBind ty_bind) (_, ann, rhs) =
@@ -400,20 +377,16 @@ module HM () = struct
           (id, ann, rhs)
         in
         let decls = zipWith infer_let env' decls in
-
         (* Decrement the nesting level after this recursive let binding. *)
         leave_level ();
-
         (* Generalize the types of all the bindings. Only type variables at a
            deeper level are generalized. *)
         let generalized_bindings =
           List.map (fun (id, _, rhs) -> (id, VarBind (gen (typ rhs)))) decls
         in
-
         (* Update the types in the environment by appending them to the original
            env.*)
         let env = List.append generalized_bindings env in
-
         (* Typecheck the body of the recursive let binding and return up its
            type. *)
         let body = infer env body in
