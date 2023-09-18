@@ -1,0 +1,8 @@
+(library
+ (inline_tests)
+ (public_name hm_practice)
+ (preprocess
+  (pps ppx_inline_test)))
+(env
+  (dev
+    (flags (:standard -w -p-30))))
