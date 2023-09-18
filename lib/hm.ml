@@ -35,7 +35,6 @@ module HM () = struct
     | AnnTyVar of id
     | AnnArrow of ann * ann
 
-  (* record type with nominal type *)
   and ty =
     | TBool
     | TRecord of id * record_ty
