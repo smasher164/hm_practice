@@ -29,6 +29,9 @@
             ocamlformat
             containers
             batteries
+            base
+            core
+            stdio
           ];
         };
       });

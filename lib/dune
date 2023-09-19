@@ -1,6 +1,7 @@
 (library
  (inline_tests)
  (public_name hm_practice)
+ (libraries base stdio)
  (preprocess
   (pps ppx_inline_test)))
 (env
