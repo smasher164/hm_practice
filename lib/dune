@@ -6,4 +6,4 @@
   (pps ppx_inline_test)))
 (env
   (dev
-    (flags (:standard -w -p-30))))
+    (flags (:standard -w -30))))

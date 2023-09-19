@@ -84,10 +84,12 @@ module HM () = struct
   let ty_kind (ty : ty) =
     match ty with
     | TyBool -> "TyBool"
-    | TyRecord (_, _) -> "TyRecord"
+    | TyRecord _ -> "TyRecord"
     | TyVar _ -> "TyVar"
     (* | QVar _ -> "QVar" *)
-    | TyArrow (_, _) -> "TyArrow"
+    | TyArrow _ -> "TyArrow"
+    | TyName _ -> "TyName"
+    | TyApp _ -> "TyApp"
 
   let rec ty_string (ty : ty) =
     match ty with
@@ -99,13 +101,16 @@ module HM () = struct
         Printf.sprintf "TyVar(Unbound(%s,%d))" id lvl
     (* | QVar id -> Printf.sprintf "QVar(%s)" id *)
     | TyArrow (f, d) -> ty_string f ^ " -> " ^ ty_string d
+    | TyName name -> name
+    | TyApp (ty, param) ->
+        Printf.sprintf "%s %s" (ty_string ty) (ty_string param)
 
   and ty_fields (flds : record_ty) =
     flds
     |> List.map ~f:(fun (id, ty) -> id ^ ": " ^ ty_string ty)
     |> String.concat ~sep:", "
 
-  let lookup_var_type name (e: env) : polytype =
+  let lookup_var_type name (e : env) : polytype =
     match List.Assoc.find e ~equal:Poly.equal name with
     | Some (VarBind t) -> t
     | _ -> raise (Undefined (Printf.sprintf "variable %s not defined" name))
@@ -167,42 +172,53 @@ module HM () = struct
     { type_params; ty }
 
   let inst (pty : polytype) : ty =
-    if (List.length pty.type_params) = 0 then
-      pty.ty
+    if List.length pty.type_params = 0 then pty.ty
     else
-    (* Use this hash table to keep track of polytypes that have already been
-       instantiated. *)
-    (* TODO: clean this up. *)
-    let tbl = Hashtbl.create_mapped (module String) ~get_key:(fun x -> x) ~get_data:(fun _ -> fresh_unbound_var()) pty.type_params in
-    let tbl = match tbl with
-    | `Ok x -> x
-    | `Duplicate_keys _ -> failwith ""
-  in
-    let rec inst' (ty : ty) =
-      match force ty with
-      | TyVar {contents = Unbound (id, _)} as tv -> (
-          (* If it's a polytype, check to see if we've already instantiated
-             it. *)
-          match Hashtbl.find tbl id with
-          | Some tv -> tv
-          | None -> tv
-              (* Otherwise, create a fresh monotype, and add it into the
-                 table. *)
-              (* let tv = fresh_unbound_var () in
-              Hashtbl.add tbl id tv; *)
-              )
-      | TyArrow (from, dst) ->
-          (* Instantiate the type vars in the parameter and return types. *)
-          TyArrow (inst' from, inst' dst)
-      | TyRecord (id, flds) ->
-          (* Instantiate the type vars in the record fields. *)
-          let inst_fld (id, ty) = (id, inst' ty) in
-          TyRecord (id, List.map ~f:inst_fld flds)
-      | ty -> ty
-    in
-    inst' pty.ty
+      (* Use this hash table to keep track of polytypes that have already been
+         instantiated. *)
+      (* TODO: clean this up. *)
+      let tbl =
+        Hashtbl.create_mapped
+          (module String)
+          ~get_key:(fun x -> x)
+          ~get_data:(fun _ -> fresh_unbound_var ())
+          pty.type_params
+      in
+      let tbl =
+        match tbl with `Ok x -> x | `Duplicate_keys _ -> failwith ""
+      in
+      let rec inst' (ty : ty) =
+        match force ty with
+        | TyVar { contents = Unbound (id, _) } as tv -> (
+            (* If it's a polytype, check to see if we've already instantiated
+               it. *)
+            match Hashtbl.find tbl id with
+            | Some tv -> tv
+            | None ->
+                tv
+                (* Otherwise, create a fresh monotype, and add it into the
+                   table. *)
+                (* let tv = fresh_unbound_var () in Hashtbl.add tbl id tv; *))
+        | TyArrow (from, dst) ->
+            (* Instantiate the type vars in the parameter and return types. *)
+            TyArrow (inst' from, inst' dst)
+        | TyRecord (id, flds) ->
+            (* Instantiate the type vars in the record fields. *)
+            let inst_fld (id, ty) = (id, inst' ty) in
+            TyRecord (id, List.map ~f:inst_fld flds)
+        | ty -> ty
+      in
+      inst' pty.ty
 
-  let rec occurs (src: tv ref) (ty: ty) : unit =
+  let expect_varbind bind =
+    match bind with VarBind ty -> ty | _ -> failwith "expected VarBind"
+
+  let expect_unbound (tv : tv ref) =
+    match !tv with
+    | Unbound (id, lvl) -> (id, lvl)
+    | _ -> failwith "expected Unbound"
+
+  let rec occurs (src : tv ref) (ty : ty) : unit =
     (* Follow all the links. If we see a type variable, it will only be
        Unbound. *)
     match force ty with
@@ -211,8 +227,8 @@ module HM () = struct
         raise OccursCheck
     | TyVar tgt ->
         (* Grab src and tgt's levels. *)
-        let (Unbound (_, src_lvl)) = !src in
-        let (Unbound (id, tgt_lvl)) = !tgt in
+        let _, src_lvl = expect_unbound src in
+        let id, tgt_lvl = expect_unbound tgt in
         (* Compute the minimum of their levels (the outermost scope). *)
         let min_lvl = min src_lvl tgt_lvl in
         (* Update the tgt's level to be the minimum. *)
@@ -236,7 +252,8 @@ module HM () = struct
        Unbound. *)
     let t1, t2 = (force t1, force t2) in
     match (t1, t2) with
-    | _ when Poly.equal t1 t2 -> () (* The types are trivially equal (e.g. TyBool). *)
+    | _ when Poly.equal t1 t2 ->
+        () (* The types are trivially equal (e.g. TyBool). *)
     | TyVar tv, ty | ty, TyVar tv ->
         (* If either type is a type variable, ensure that the type variable does
            not occur in the type. Update the levels while you're at it. *)
@@ -249,11 +266,13 @@ module HM () = struct
         unify f1 f2;
         unify d1 d2
     | TyRecord (id1, fds1), TyRecord (id2, fds2)
-      when Poly.equal id1 id2 && Poly.equal (List.length fds1) (List.length fds2) ->
+      when Poly.equal id1 id2
+           && Poly.equal (List.length fds1) (List.length fds2) ->
         (* Both types are records with the same name and number of fields. *)
         let unify_fld (id1, ty1) (id2, ty2) =
-          let _ : id = id1 in
-          if not (Poly.equal id1 id2) then raise (fail_unify ty1 ty2) else unify ty1 ty2
+          let (_ : id) = id1 in
+          if not (Poly.equal id1 id2) then raise (fail_unify ty1 ty2)
+          else unify ty1 ty2
         in
         (* Unify their corresponding fields. *)
         List.iter2_exn ~f:unify_fld fds1 fds2
@@ -369,7 +388,9 @@ module HM () = struct
         enter_level ();
         (* Use this hash table to keep track of duplicate definitions in the
            recursive let. *)
-        let deduped_defs : (id, unit) Hashtbl.t = Hashtbl.create (module String) in
+        let deduped_defs : (id, unit) Hashtbl.t =
+          Hashtbl.create (module String)
+        in
         (* Extend environment with the declarations in the recursive let binding
            and check for duplicates. *)
         let extend_env (id, ann, _) env' =
@@ -379,10 +400,11 @@ module HM () = struct
               Hashtbl.add_exn deduped_defs ~key:id ~data:();
               (* If there's a type annotation, reify it. Fresh type variables
                  are instantiated at the current level. *)
-              let ty_decl = match ann with
-              | Some ann -> inst ann
-              | None -> fresh_unbound_var()
-          in
+              let ty_decl =
+                match ann with
+                | Some ann -> inst ann
+                | None -> fresh_unbound_var ()
+              in
 
               (* Extend the environment by prepending the binding and its
                  type. *)
@@ -391,9 +413,11 @@ module HM () = struct
         let env' : env = List.fold_right ~f:extend_env ~init:env decls in
         (* Using the extended environment, infer the types of the
            right-hand-side of all the let declarations. *)
-        let infer_let (id, VarBind ty_bind) (_, ann, rhs) =
+        let infer_let (id, bind) (_, ann, rhs) =
+          let ty_bind = expect_varbind bind in
           let rhs = infer env' rhs in
-          unify ty_bind.ty (typ rhs); (* It's safe to do .ty because ty_bind is not generalized. *)
+          unify ty_bind.ty (typ rhs);
+          (* It's safe to do .ty because ty_bind is not generalized. *)
           (id, ann, rhs)
         in
         let decls = zipWith infer_let env' decls in
