@@ -3,6 +3,13 @@ open Base
 module HM () = struct
   type id = string
   and level = int
+  and prog = tycon list * exp
+
+  and tycon = {
+    name : id;
+    type_params : id list;
+    ty : record_ty;
+  }
 
   and exp =
     | EBool of bool
@@ -59,7 +66,7 @@ module HM () = struct
 
   and bind =
     | VarBind of polytype
-    | TypeBind of polytype
+    | TypeBind of tycon
 
   and env = (id * bind) list
 
@@ -115,7 +122,7 @@ module HM () = struct
     | Some (VarBind t) -> t
     | _ -> raise (Undefined (Printf.sprintf "variable %s not defined" name))
 
-  let lookup_type name e : polytype =
+  let lookup_type name e : tycon =
     match List.Assoc.find e ~equal:Poly.equal name with
     | Some (TypeBind t) -> t
     | _ -> raise (Undefined (Printf.sprintf "type %s not defined" name))
@@ -158,6 +165,9 @@ module HM () = struct
           (* Generalize the type vars in the parameter and return types. *)
           gen' from;
           gen' dst (* TyArrow (gen from, gen dst) *)
+      | TyApp (a, b) ->
+          gen' a;
+          gen' b
       | TyRecord (_, flds) ->
           (* Generalize the type vars in the record fields. *)
           List.iter flds ~f:(fun (_, ty) -> gen' ty)
@@ -202,13 +212,15 @@ module HM () = struct
         | TyArrow (from, dst) ->
             (* Instantiate the type vars in the parameter and return types. *)
             TyArrow (inst' from, inst' dst)
+        | TyApp (a, b) -> TyApp (inst' a, inst' b)
         | TyRecord (id, flds) ->
             (* Instantiate the type vars in the record fields. *)
             let inst_fld (id, ty) = (id, inst' ty) in
             TyRecord (id, List.map ~f:inst_fld flds)
         | ty -> ty
       in
-      inst' pty.ty
+      let ty = inst' pty.ty in
+      ty
 
   let expect_varbind bind =
     match bind with VarBind ty -> ty | _ -> failwith "expected VarBind"
@@ -237,6 +249,9 @@ module HM () = struct
         (* Check that src occurs in the parameter and return type. *)
         occurs src from;
         occurs src dst
+    | TyApp (a, b) ->
+        occurs src a;
+        occurs src b (* TODO: this is correct right? *)
     | TyRecord (_, flds) ->
         (* Check that src occurs in the field types. *)
         List.iter ~f:(fun (_, ty) -> occurs src ty) flds
@@ -276,6 +291,10 @@ module HM () = struct
         in
         (* Unify their corresponding fields. *)
         List.iter2_exn ~f:unify_fld fds1 fds2
+    | TyApp (a1, b1), TyApp (a2, b2) ->
+        unify a1 a2;
+        unify b1 b2
+    | TyName a, TyName b when Poly.equal a b -> ()
     | _ ->
         (* Unification has failed. *)
         raise (fail_unify t1 t2)
@@ -292,6 +311,29 @@ module HM () = struct
     | TELetRec (_, _, ty) -> ty
 
   let dont_generalize ty : polytype = { type_params = []; ty }
+
+  (* Returns the the tyname/tyapp, as well as underlying type instantiated with
+     those fresh unbound vars. *)
+  let inst_tycon (tc : tycon) : ty * ty =
+    (* Fold over tc.type_params and build up a tyapp, while also adding to a
+       hash table. Then, instantiate the type with the hash table. *)
+    let tbl = Hashtbl.create (module String) in
+    let tyapp =
+      List.fold_right tc.type_params ~init:(TyName tc.name) ~f:(fun id acc ->
+          let tv = fresh_unbound_var () in
+          Hashtbl.add_exn tbl ~key:id ~data:tv;
+          TyApp (acc, tv))
+    in
+    let rec inst_tycon' = function
+      | TyName id -> Hashtbl.find_exn tbl id
+      | TyApp (a, b) -> TyApp (inst_tycon' a, inst_tycon' b)
+      | TyArrow (from, dst) -> TyArrow (inst_tycon' from, inst_tycon' dst)
+      | TyRecord (id, flds) ->
+          TyRecord (id, List.map ~f:(fun (id, ty) -> (id, inst_tycon' ty)) flds)
+      | TyVar _ -> failwith "inst_tycon: TyVar"
+      | TyBool -> TyBool
+    in
+    (tyapp, inst_tycon' (TyRecord (tc.name, tc.ty)))
 
   let rec infer (env : env) (exp : exp) : texp =
     match exp with
@@ -328,7 +370,13 @@ module HM () = struct
     | ERecord (tname, rec_lit) ->
         (* TODO: annotated record types? *)
         (* Look up the declared type for the type name on the record literal. *)
-        let ty_dec = inst (lookup_type tname env) in
+        let tcon = lookup_type tname env in
+        let ty_app, ty_dec = inst_tycon tcon in
+        (* let (ty_dec, tyvars) = inst pty in (* oof but tyvars needs to be ordered *) *)
+        (* order the type vars based on their order in the lookup? *)
+        (* let tyvars = List.map pty.type_params ~f:(fun id -> Hashtbl.find_exn
+           tyvars id) in *)
+        (* let ty_app = tyapp_from_vars (TyName(tname)) tyvars in *)
         (* Infer the types of all the fields in the literal. *)
         let rec_lit = List.map ~f:(fun (id, x) -> (id, infer env x)) rec_lit in
         (* Synthesize a record type with the types of those fields. *)
@@ -338,7 +386,7 @@ module HM () = struct
         (* Unify that with the declared type. *)
         unify ty_dec ty_rec;
         (* Return the record's type. *)
-        TERecord (tname, rec_lit, ty_dec)
+        TERecord (tname, rec_lit, ty_app)
     | EProj (rcd, fld) -> (
         (* Infer the type of the expression we're projecting on. *)
         let rcd = infer env rcd in
@@ -435,6 +483,40 @@ module HM () = struct
            type. *)
         let body = infer env body in
         TELetRec (decls, body, typ body)
+
+  let checkTycon m tc =
+    let m = Hash_set.copy m in
+    List.iter tc.type_params ~f:(fun id -> Hash_set.add m id);
+    let rec checkTycon' ty =
+      match ty with
+      | TyVar _ -> failwith "checkTycon: TyVar"
+      | TyArrow (from, dst) ->
+          checkTycon' from;
+          checkTycon' dst
+      | TyApp (a, b) ->
+          checkTycon' a;
+          checkTycon' b
+      | TyRecord (tname, flds) ->
+          if not (Hash_set.mem m tname) then
+            raise (Undefined (Printf.sprintf "type %s not defined" tname));
+          List.iter flds ~f:(fun (_, ty) -> checkTycon' ty)
+      | TyName tname ->
+          if not (Hash_set.mem m tname) then
+            raise (Undefined (Printf.sprintf "type %s not defined" tname))
+      | _ -> ()
+    in
+    checkTycon' (TyRecord (tc.name, tc.ty))
+
+  let typecheck_prog (tl, exp) =
+    let m = Hash_set.create (module String) in
+    let env =
+      List.fold_right tl ~init:[] ~f:(fun tc acc ->
+          Hash_set.add m tc.name;
+          (tc.name, TypeBind tc) :: acc)
+    in
+    (* walk tycons again to make sure that all tynames are referenced *)
+    List.iter tl ~f:(checkTycon m);
+    infer env exp
 end
 
 let%test "id" =
@@ -461,6 +543,17 @@ let%test "fix" =
         EVar "fix" )
   in
   let x = infer [] x in
+  let t = typ x in
+  Stdio.print_endline (ty_string t);
+  true
+
+let%test "tdecl" =
+  let open HM () in
+  let prog =
+    ( [ { name = "Foo"; type_params = []; ty = [ ("x", TyBool) ] } ],
+      ERecord ("Foo", [ ("x", EBool true) ]) )
+  in
+  let x = typecheck_prog prog in
   let t = typ x in
   Stdio.print_endline (ty_string t);
   true
