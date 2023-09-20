@@ -4,6 +4,6 @@
  (libraries base stdio)
  (preprocess
   (pps ppx_inline_test)))
-(env
-  (dev
-    (flags (:standard -w -30))))
+; (env
+;   (dev
+;     (flags (:standard -w -30))))
