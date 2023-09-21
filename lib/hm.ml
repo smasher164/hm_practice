@@ -46,10 +46,9 @@ module HM () = struct
   and ty =
     | TyBool (* Bool *)
     | TyRecord of id * record_ty (* Record: Foo{x: Bool, y: Bool} *)
-    | TyVar of tv ref
-      (* Type variable Unbound/Link. Held behind a mutable reference. *)
+    | TyVar of tv ref (* Type variable: held behind a mutable reference. *)
     | QVar of id
-      (* Quantified type variable. If a type T contains a QVar("'a"), it implies
+      (* Quantified type variable: If a type T contains a QVar("'a"), it implies
          that T is a polytype of the with an implicit forall 'a in front of it.
          For example, TyArrow(QVar("'a"), TyBool) is equivalent to forall 'a. 'a
          -> Bool *)
