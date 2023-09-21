@@ -2,16 +2,9 @@ open Base
 
 module HM () = struct
   type id = string
-  and level = int
-  and prog = tycon list * exp
+  type level = int
 
-  and tycon = {
-    name : id;
-    type_params : id list;
-    ty : record_ty;
-  }
-
-  and exp =
+  type exp =
     | EBool of bool
     | EVar of id
     | EApp of exp * exp
@@ -53,6 +46,14 @@ module HM () = struct
   and tv =
     | Unbound of id * level
     | Link of ty
+
+  and prog = tycon list * exp
+
+  and tycon = {
+    name : id;
+    type_params : id list;
+    ty : record_ty;
+  }
 
   and bind =
     | VarBind of ty
@@ -102,6 +103,10 @@ module HM () = struct
     | TyApp (ty, param) ->
         Printf.sprintf "%s %s" (ty_string ty) (ty_string param)
 
+  and tycon_string (tc : tycon) =
+    Printf.sprintf "type %s %s = %s" tc.name (ty_fields tc.ty)
+      (ty_string (TyRecord (tc.name, tc.ty)))
+
   and ty_fields (flds : record_ty) =
     flds
     |> List.map ~f:(fun (id, ty) -> id ^ ": " ^ ty_string ty)
@@ -136,6 +141,14 @@ module HM () = struct
 
   let[@tail_mod_cons] rec zipWith f l1 l2 =
     match (l1, l2) with x :: xs, y :: ys -> f x y :: zipWith f xs ys | _ -> []
+
+  let expect_varbind bind =
+    match bind with VarBind ty -> ty | _ -> failwith "expected VarBind"
+
+  let expect_unbound (tv : tv ref) =
+    match !tv with
+    | Unbound (id, lvl) -> (id, lvl)
+    | _ -> failwith "expected Unbound"
 
   let rec force : ty -> ty = function
     | TyVar { contents = Link ty } -> force ty
@@ -185,14 +198,6 @@ module HM () = struct
     in
     let ty = inst' pty in
     ty
-
-  let expect_varbind bind =
-    match bind with VarBind ty -> ty | _ -> failwith "expected VarBind"
-
-  let expect_unbound (tv : tv ref) =
-    match !tv with
-    | Unbound (id, lvl) -> (id, lvl)
-    | _ -> failwith "expected Unbound"
 
   let rec occurs (src : tv ref) (ty : ty) : unit =
     (* Follow all the links. If we see a type variable, it will only be
@@ -403,7 +408,8 @@ module HM () = struct
         let env' : env = List.fold_right ~f:extend_env ~init:env decls in
         (* Using the extended environment, infer the types of the
            right-hand-side of all the let declarations. *)
-        let infer_let (id, bind) (_, ann, rhs) =
+        let infer_let : id * bind -> let_decl -> id * ty option * texp =
+         fun (id, bind) (_, ann, rhs) ->
           let ty_bind = expect_varbind bind in
           let rhs = infer env' rhs in
           unify ty_bind (typ rhs);
