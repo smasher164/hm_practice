@@ -562,7 +562,7 @@ module HM () = struct
     infer env exp
 end
 
-(* Some example programs. *)
+(* TODO: Some example programs. *)
 (* 1. Polymorphic identity function *)
 (* 2. fun x -> let y = fun z -> z in y *)
 (* 3. fun x -> let y = x in y *)
