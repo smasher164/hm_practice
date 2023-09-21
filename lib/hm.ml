@@ -1,9 +1,9 @@
 open Base
 
-(** Module HM contains a typechecker for the Damas-Hindley-Milner (DHM) type
-    system with some basic extensions like nominal records, type annotations, and
-    recursive let bindings. It uses unification based on union-find (Algorithm J)
-    to solve type constraints. *)
+(* Module HM contains a typechecker for the Damas-Hindley-Milner (DHM) type
+   system with some basic extensions like nominal records, type annotations, and
+   recursive let bindings. It uses unification based on union-find (Algorithm J)
+   to solve type constraints. *)
 module HM () = struct
   (* Represents identifiers like variables, type names, and type variables. *)
   type id = string
@@ -89,6 +89,12 @@ module HM () = struct
   (* The environment is a list of bindings. *)
   and env = (id * bind) list
 
+  (* Dereference a type variable by following all the links and get the
+     underlying type. *)
+  let rec force : ty -> ty = function
+    | TyVar { contents = Link ty } -> force ty
+    | ty -> ty
+
   (* Utility functions for pretty printing. *)
   let ty_kind (ty : ty) =
     match ty with
@@ -100,28 +106,45 @@ module HM () = struct
     | TyName _ -> "TyName"
     | TyApp _ -> "TyApp"
 
-  let rec ty_string (ty : ty) =
+  let ty_fields f flds =
+    flds
+    |> List.map ~f:(fun (id, ty) -> id ^ ": " ^ f ty)
+    |> String.concat ~sep:", "
+
+  let tycon_string f tc =
+    Printf.sprintf "type %s %s = %s" tc.name (ty_fields f tc.ty)
+      (f (TyRecord (tc.name, tc.ty)))
+
+  let rec ty_debug ty =
     match ty with
     | TyBool -> "TyBool"
-    | TyRecord (id, flds) -> Printf.sprintf "%s{%s}" id (ty_fields flds)
+    | TyRecord (id, flds) ->
+        Printf.sprintf "%s{%s}" id (ty_fields ty_debug flds)
     | TyVar { contents = Link ty } ->
-        Printf.sprintf "TyVar(Link(%s))" (ty_string ty)
+        Printf.sprintf "TyVar(Link(%s))" (ty_debug ty)
     | TyVar { contents = Unbound (id, lvl) } ->
         Printf.sprintf "TyVar(Unbound(%s,%d))" id lvl
     | QVar id -> Printf.sprintf "QVar(%s)" id
-    | TyArrow (f, d) -> ty_string f ^ " -> " ^ ty_string d
+    | TyArrow (from, dst) -> "(" ^ ty_debug from ^ " -> " ^ ty_debug dst ^ ")"
+    | TyName name -> name
+    | TyApp (ty, param) -> Printf.sprintf "%s %s" (ty_debug ty) (ty_debug param)
+
+  let tycon_debug tc = tycon_string ty_debug tc
+
+  let rec ty_pretty ty =
+    match force ty with
+    | TyBool -> "bool"
+    | TyRecord (id, flds) ->
+        Printf.sprintf "%s{%s}" id (ty_fields ty_pretty flds)
+    | TyVar { contents = Link _ } -> failwith "unexpected: Link"
+    | TyVar { contents = Unbound (id, _) } -> id
+    | QVar id -> id
+    | TyArrow (from, dst) -> "(" ^ ty_pretty from ^ " -> " ^ ty_pretty dst ^ ")"
     | TyName name -> name
     | TyApp (ty, param) ->
-        Printf.sprintf "%s %s" (ty_string ty) (ty_string param)
+        Printf.sprintf "%s %s" (ty_pretty ty) (ty_pretty param)
 
-  and tycon_string (tc : tycon) =
-    Printf.sprintf "type %s %s = %s" tc.name (ty_fields tc.ty)
-      (ty_string (TyRecord (tc.name, tc.ty)))
-
-  and ty_fields (flds : record_ty) =
-    flds
-    |> List.map ~f:(fun (id, ty) -> id ^ ": " ^ ty_string ty)
-    |> String.concat ~sep:", "
+  let tycon_pretty tc = tycon_string ty_pretty tc
 
   (* The typechecker raises the following exceptions. *)
   exception Undefined of string
@@ -145,8 +168,8 @@ module HM () = struct
 
   let unify_failed t1 t2 =
     UnificationFailure
-      (Printf.sprintf "failed to unify type %s with %s" (ty_string t1)
-         (ty_string t2))
+      (Printf.sprintf "failed to unify type %s with %s" (ty_debug t1)
+         (ty_debug t2))
 
   let expect_varbind bind =
     match bind with VarBind ty -> ty | _ -> failwith "expected VarBind"
@@ -198,12 +221,6 @@ module HM () = struct
     Int.incr gensym_counter;
     let tvar = "'" ^ Int.to_string n in
     TyVar (ref (Unbound (tvar, !current_level)))
-
-  (* Dereference a type variable by following all the links and get the
-     underlying type. *)
-  let rec force : ty -> ty = function
-    | TyVar { contents = Link ty } -> force ty
-    | ty -> ty
 
   (* Generalize a type by replacing all the unbound type variables with
      quantified type variables. In order to decide whether to generalize an
@@ -332,7 +349,6 @@ module HM () = struct
            && Poly.equal (List.length fds1) (List.length fds2) ->
         (* Both types are records with the same name and number of fields. *)
         let unify_fld (id1, ty1) (id2, ty2) =
-          let (_ : id) = id1 in
           if not (Poly.equal id1 id2) then raise (unify_failed ty1 ty2)
           else unify ty1 ty2
         in
@@ -546,33 +562,47 @@ module HM () = struct
     infer env exp
 end
 
+(* Some example programs. *)
+(* 1. Polymorphic identity function *)
+(* 2. fun x -> let y = fun z -> z in y *)
+(* 3. fun x -> let y = x in y *)
+(* 4. fun x -> let y = fun z -> x z in y *)
+(* 5. if true then false else true *)
+(* 6. let f: 'a -> 'a = fun x -> x *)
+(* 7. type box 'a = { x: 'a } let r : box bool = box{x = true} *)
+(* 8. type box 'a = { x: 'a } let r = box{x = true} in r.x *)
+(* 9. let rec *)
+(* 10. two conflicting record types *)
+(* 11. fix *)
+
 let%test "id" =
   let open HM () in
-  let x = infer [] (ELet (("a", None, ELam ("x", EVar "x")), EVar "a")) in
+  let prog = ([], ELet (("id", None, ELam ("x", EVar "x")), EVar "id")) in
+  let x = typecheck_prog prog in
   let t = typ x in
-  Stdio.print_endline (ty_string t);
-  true
+  Poly.equal (ty_pretty t) "('2 -> '2)"
 
-let%test "id2" =
+let%test "2" =
   let open HM () in
-  let x = infer [] (ELet (("a", None, ELam ("x", EVar "x")), EVar "a")) in
+  let prog =
+    ([], ELam ("x", ELet (("y", None, ELam ("z", EVar "z")), EVar "y")))
+  in
+  let x = typecheck_prog prog in
   let t = typ x in
-  Stdio.print_endline (ty_string t);
-  true
+  Poly.equal (ty_pretty t) "('0 -> ('3 -> '3))"
 
 let%test "fix" =
   let open HM () in
-  let x =
+  let fix =
     ELetRec
       ( [
           ("fix", None, ELam ("f", EApp (EVar "f", EApp (EVar "fix", EVar "f"))));
         ],
         EVar "fix" )
   in
-  let x = infer [] x in
+  let x = typecheck_prog ([], fix) in
   let t = typ x in
-  Stdio.print_endline (ty_string t);
-  true
+  Poly.equal (ty_pretty t) "(('4 -> '4) -> '4)"
 
 let%test "tdecl" =
   let open HM () in
@@ -582,5 +612,5 @@ let%test "tdecl" =
   in
   let x = typecheck_prog prog in
   let t = typ x in
-  Stdio.print_endline (ty_string t);
+  Stdio.print_endline (ty_pretty t);
   true
