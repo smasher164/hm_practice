@@ -497,7 +497,6 @@ module HM () = struct
           let ty_bind = expect_varbind bind in
           let rhs = infer env' rhs in
           unify ty_bind (typ rhs);
-          (* It's safe to do .ty because ty_bind is not generalized. *)
           (id, ann, rhs)
         in
         (* We use zip here to map over the environment and the corresponding let
