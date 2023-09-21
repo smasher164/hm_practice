@@ -14,21 +14,15 @@ module HM () = struct
 
   (* An expression *)
   type exp =
-    | EBool of bool (* boolean: true/false *)
-    | EVar of id (* variable: x *)
-    | EApp of exp * exp (* function application: f arg *)
-    | ELam of id * exp (* lambda: fun x -> x *)
-    | ERecord of id * record_lit (* record literal: Foo{x = true, y = false} *)
-    | EProj of exp * id (* record projection: r.y *)
-    | EIf of
-        exp
-        * exp
-        * exp (* if-then-else: if <cond-exp> then <then-exp> else <else-exp> *)
-    | ELet of let_decl * exp
-      (* let binding: let x : <type-annotation> = <rhs-exp> in <body-exp> *)
-    | ELetRec of
-        let_decl list
-        * exp (* recursive let binding: let rec <decls> in <body-exp> *)
+    | EBool of bool (* true/false *)
+    | EVar of id (* x *)
+    | EApp of exp * exp (* f arg *)
+    | ELam of id * exp (* fun x -> x *)
+    | ERecord of id * record_lit (* Foo{x = true, y = false} *)
+    | EProj of exp * id (* r.y *)
+    | EIf of exp * exp * exp (* if <exp> then <exp> else <exp> *)
+    | ELet of let_decl * exp (* let x : <type-annotation> = <exp> in <exp> *)
+    | ELetRec of let_decl list * exp (* let rec <decls> in <exp> *)
 
   and record_lit = (id * exp) list
   and let_decl = id * ty option * exp
@@ -65,6 +59,7 @@ module HM () = struct
 
   and record_ty = (id * ty) list
 
+  (* A type variable *)
   and tv =
     | Unbound of id * level
       (* Unbound type variable: Holds the type variable's name as well as the
@@ -91,7 +86,8 @@ module HM () = struct
 
   (* Dereference a type variable by following all the links and get the
      underlying type. *)
-  let rec force : ty -> ty = function
+  let rec force (ty : ty) : ty =
+    match ty with
     | TyVar { contents = Link ty } -> force ty
     | ty -> ty
 
@@ -129,7 +125,7 @@ module HM () = struct
     | TyName name -> name
     | TyApp (ty, param) -> Printf.sprintf "%s %s" (ty_debug ty) (ty_debug param)
 
-  let tycon_debug tc = tycon_string ty_debug tc
+  let tycon_debug = tycon_string ty_debug
 
   let rec ty_pretty ty =
     match force ty with
@@ -144,7 +140,7 @@ module HM () = struct
     | TyApp (ty, param) ->
         Printf.sprintf "%s %s" (ty_pretty ty) (ty_pretty param)
 
-  let tycon_pretty tc = tycon_string ty_pretty tc
+  let tycon_pretty = tycon_string ty_pretty
 
   (* The typechecker raises the following exceptions. *)
   exception Undefined of string
@@ -172,7 +168,9 @@ module HM () = struct
          (ty_debug t2))
 
   let expect_varbind bind =
-    match bind with VarBind ty -> ty | _ -> failwith "expected VarBind"
+    match bind with
+    | VarBind ty -> ty
+    | _ -> failwith "expected VarBind"
 
   let expect_unbound (tv : tv ref) =
     match !tv with
@@ -192,7 +190,8 @@ module HM () = struct
     | _ -> raise (undefined_error "type" name)
 
   (* Get the type of a typed expression. *)
-  let typ : texp -> ty = function
+  let typ (texp : texp) : ty =
+    match texp with
     | TEBool _ -> TyBool
     | TEVar (_, ty) -> ty
     | TEApp (_, _, ty) -> ty
@@ -206,7 +205,9 @@ module HM () = struct
   (* Zip over two lists, and apply a function to each pair of elements. If the
      lists have different lengths, stop at the shorter length. *)
   let[@tail_mod_cons] rec zipWith f l1 l2 =
-    match (l1, l2) with x :: xs, y :: ys -> f x y :: zipWith f xs ys | _ -> []
+    match (l1, l2) with
+    | x :: xs, y :: ys -> f x y :: zipWith f xs ys
+    | _ -> []
 
   (* Global state that stores the current level and a counter for generating
      fresh unbound type variables. *)
@@ -251,7 +252,9 @@ module HM () = struct
   let inst ?tbl (pty : ty) : ty =
     let tbl =
       (* If a hash table is provided, use it. Otherwise, create a new one. *)
-      match tbl with None -> Hashtbl.create (module String) | Some tbl -> tbl
+      match tbl with
+      | None -> Hashtbl.create (module String)
+      | Some tbl -> tbl
     in
     let rec inst' (ty : ty) =
       match force ty with
@@ -441,7 +444,9 @@ module HM () = struct
         enter_level ();
         (* If there's a type annotation on this let binding, instantiate it. *)
         let ty_rhs =
-          match ann with Some ann -> inst ann | None -> fresh_unbound_var ()
+          match ann with
+          | Some ann -> inst ann
+          | None -> fresh_unbound_var ()
         in
         (* Infer the type of the right-hand-side. *)
         let rhs = infer env rhs in
