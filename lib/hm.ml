@@ -107,15 +107,8 @@ module HM () = struct
     |> List.map ~f:(fun (id, ty) -> id ^ ": " ^ ty_string ty)
     |> String.concat ~sep:", "
 
-  let lookup_var_type name (e : env) : ty =
-    match List.Assoc.find e ~equal:Poly.equal name with
-    | Some (VarBind t) -> t
-    | _ -> raise (Undefined (Printf.sprintf "variable %s not defined" name))
-
-  let lookup_tycon name (e : env) : tycon =
-    match List.Assoc.find e ~equal:Poly.equal name with
-    | Some (TypeBind t) -> t
-    | _ -> raise (Undefined (Printf.sprintf "type %s not defined" name))
+  let undefined_error kind name =
+    Undefined (Printf.sprintf "%s %s not defined" kind name)
 
   let type_error expected got =
     Expected (Printf.sprintf "expected type %s, got %s" expected got)
@@ -126,6 +119,21 @@ module HM () = struct
   let duplicate_definition def =
     DuplicateDefinition (Printf.sprintf "duplicate definition of %s" def)
 
+  let unify_failed t1 t2 =
+    UnificationFailure
+      (Printf.sprintf "failed to unify type %s with %s" (ty_string t1)
+         (ty_string t2))
+
+  let lookup_var_type name (e : env) : ty =
+    match List.Assoc.find e ~equal:Poly.equal name with
+    | Some (VarBind t) -> t
+    | _ -> raise (undefined_error "variable" name)
+
+  let lookup_tycon name (e : env) : tycon =
+    match List.Assoc.find e ~equal:Poly.equal name with
+    | Some (TypeBind t) -> t
+    | _ -> raise (undefined_error "type" name)
+
   let[@tail_mod_cons] rec zipWith f l1 l2 =
     match (l1, l2) with x :: xs, y :: ys -> f x y :: zipWith f xs ys | _ -> []
 
@@ -134,7 +142,6 @@ module HM () = struct
     | ty -> ty
 
   let rec gen (ty : ty) : ty =
-    (* let type_params : id Hash_set.t = Hash_set.create (module String) in *)
     match force ty with
     | TyVar { contents = Unbound (id, lvl) } when lvl > !current_level ->
         (* Generalize this unbound type variable only if its level is deeper
@@ -143,11 +150,8 @@ module HM () = struct
         QVar id
     | TyArrow (from, dst) ->
         (* Generalize the type vars in the parameter and return types. *)
-        (* gen' from; gen' dst *)
         TyArrow (gen from, gen dst)
-    | TyApp (a, b) ->
-        (* gen' a; gen' b *)
-        TyApp (gen a, gen b)
+    | TyApp (a, b) -> TyApp (gen a, gen b)
     | TyRecord (id, flds) ->
         (* Generalize the type vars in the record fields. *)
         let gen_fld (id, ty) = (id, gen ty) in
@@ -211,16 +215,11 @@ module HM () = struct
         occurs src dst
     | TyApp (a, b) ->
         occurs src a;
-        occurs src b (* TODO: this is correct right? *)
+        occurs src b
     | TyRecord (_, flds) ->
         (* Check that src occurs in the field types. *)
         List.iter ~f:(fun (_, ty) -> occurs src ty) flds
     | _ -> ()
-
-  let fail_unify t1 t2 =
-    UnificationFailure
-      (Printf.sprintf "failed to unify type %s with %s" (ty_string t1)
-         (ty_string t2))
 
   let rec unify (t1 : ty) (t2 : ty) : unit =
     (* Follow all the links. If we see any type variables, they will only be
@@ -246,7 +245,7 @@ module HM () = struct
         (* Both types are records with the same name and number of fields. *)
         let unify_fld (id1, ty1) (id2, ty2) =
           let (_ : id) = id1 in
-          if not (Poly.equal id1 id2) then raise (fail_unify ty1 ty2)
+          if not (Poly.equal id1 id2) then raise (unify_failed ty1 ty2)
           else unify ty1 ty2
         in
         (* Unify their corresponding fields. *)
@@ -257,7 +256,7 @@ module HM () = struct
     | TyName a, TyName b when Poly.equal a b -> ()
     | _ ->
         (* Unification has failed. *)
-        raise (fail_unify t1 t2)
+        raise (unify_failed t1 t2)
 
   let typ : texp -> ty = function
     | TEBool _ -> TyBool
@@ -317,15 +316,9 @@ module HM () = struct
         (* Return a synthesized arrow type from the parameter to the body. *)
         TELam (param, body, TyArrow (ty_param, typ body))
     | ERecord (tname, rec_lit) ->
-        (* TODO: annotated record types? *)
         (* Look up the declared type for the type name on the record literal. *)
         let tcon = lookup_tycon tname env in
         let ty_app, ty_dec = inst_tycon tcon in
-        (* let (ty_dec, tyvars) = inst pty in (* oof but tyvars needs to be ordered *) *)
-        (* order the type vars based on their order in the lookup? *)
-        (* let tyvars = List.map pty.type_params ~f:(fun id -> Hashtbl.find_exn
-           tyvars id) in *)
-        (* let ty_app = tyapp_from_vars (TyName(tname)) tyvars in *)
         (* Infer the types of all the fields in the literal. *)
         let rec_lit = List.map ~f:(fun (id, x) -> (id, infer env x)) rec_lit in
         (* Synthesize a record type with the types of those fields. *)
@@ -438,7 +431,7 @@ module HM () = struct
     List.iter tc.type_params ~f:(fun id -> Hash_set.add m id);
     let rec checkTycon' ty =
       match ty with
-      | TyVar _ -> failwith "checkTycon: TyVar"
+      | TyVar _ -> failwith "unexpected: TyVar"
       | TyArrow (from, dst) ->
           checkTycon' from;
           checkTycon' dst
@@ -447,12 +440,14 @@ module HM () = struct
           checkTycon' b
       | TyRecord (tname, flds) ->
           if not (Hash_set.mem m tname) then
-            raise (Undefined (Printf.sprintf "type %s not defined" tname));
+            raise (undefined_error "type" tname);
           List.iter flds ~f:(fun (_, ty) -> checkTycon' ty)
       | TyName tname ->
           if not (Hash_set.mem m tname) then
-            raise (Undefined (Printf.sprintf "type %s not defined" tname))
-      | _ -> ()
+            raise (undefined_error "type" tname)
+      | TyBool -> ()
+      | QVar id ->
+          if not (Hash_set.mem m id) then raise (undefined_error "type" id)
     in
     checkTycon' (TyRecord (tc.name, tc.ty))
 
@@ -460,7 +455,9 @@ module HM () = struct
     let m = Hash_set.create (module String) in
     let env =
       List.fold_right tl ~init:[] ~f:(fun tc acc ->
-          Hash_set.add m tc.name;
+          (match Hash_set.strict_add m tc.name with
+          | Ok () -> ()
+          | Error _ -> raise (duplicate_definition tc.name));
           (tc.name, TypeBind tc) :: acc)
     in
     (* walk tycons again to make sure that all tynames are referenced *)
