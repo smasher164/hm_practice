@@ -586,11 +586,6 @@ module HM () = struct
     infer env exp
 end
 
-(* TODO: Some example programs. *)
-(* 9. let rec *)
-(* 10. two conflicting record types *)
-(* 11. fix *)
-
 (* 1. Polymorphic identity function *)
 let%test "id" =
   let open HM () in
