@@ -177,10 +177,10 @@ module HM () = struct
     | Unbound (id, lvl) -> (id, lvl)
     | _ -> failwith "expected Unbound"
 
-  let expect_tyapp ty =
+  let expect_tyrecord ty =
     match ty with
-    | TyApp (a, b) -> (a, b)
-    | _ -> failwith "expected TyApp"
+    | TyRecord (id, flds) -> (id, flds)
+    | _ -> raise (type_error "TyRecord" (ty_kind ty))
 
   (* Lookup a variable's type in the environment. *)
   let lookup_var_type name (e : env) : ty =
@@ -439,16 +439,15 @@ module HM () = struct
     | EProj (rcd, fld) -> (
         (* Infer the type of the expression we're projecting on. *)
         let rcd = infer env rcd in
+        (* Concretize the type in case it's a type application. *)
         let ty_rcd = concretize env (typ rcd) in
         (* Check that it's actually a record. *)
-        match ty_rcd with
-        | TyRecord (name, rec_ty) -> (
-            (* Check that it has the field we're accessing. *)
-            match List.Assoc.find rec_ty ~equal fld with
-            (* Return the field's type in the record. *)
-            | Some ty -> TEProj (rcd, fld, ty)
-            | _ -> raise (missing_field fld name))
-        | ty -> raise (type_error "TyRecord" (ty_kind ty)))
+        let name, rec_ty = expect_tyrecord ty_rcd in
+        (* Check that it has the field we're accessing. *)
+        match List.Assoc.find rec_ty ~equal fld with
+        (* Return the field's type in the record. *)
+        | Some ty -> TEProj (rcd, fld, ty)
+        | _ -> raise (missing_field fld name))
     | EIf (cond, thn, els) ->
         (* Check that the type of condition is Bool. *)
         let cond = infer env cond in
