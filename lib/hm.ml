@@ -1,4 +1,5 @@
 open Base
+open Poly
 
 (* Module HM contains a typechecker for the Damas-Hindley-Milner (DHM) type
    system with some basic extensions like nominal records, type annotations, and
@@ -49,9 +50,9 @@ module HM () = struct
     | TyVar of tv ref (* Type variable: held behind a mutable reference. *)
     | QVar of id
       (* Quantified type variable: If a type T contains a QVar("'a"), it implies
-         that T is a polytype of the with an implicit forall 'a in front of it.
-         For example, TyArrow(QVar("'a"), TyBool) is equivalent to forall 'a. 'a
-         -> Bool *)
+         that T is a polytype with an implicit forall 'a in front of it. For
+         example, TyArrow(QVar("'a"), TyBool) is equivalent to forall 'a. 'a ->
+         Bool *)
     | TyArrow of ty * ty (* Function type: T1 -> T2 *)
     | TyName of id (* Type name: Foo *)
     | TyApp of ty * ty (* Type application: T1 T2 *)
@@ -176,15 +177,20 @@ module HM () = struct
     | Unbound (id, lvl) -> (id, lvl)
     | _ -> failwith "expected Unbound"
 
+  let expect_tyapp ty =
+    match ty with
+    | TyApp (a, b) -> (a, b)
+    | _ -> failwith "expected TyApp"
+
   (* Lookup a variable's type in the environment. *)
   let lookup_var_type name (e : env) : ty =
-    match List.Assoc.find e ~equal:Poly.equal name with
+    match List.Assoc.find e ~equal name with
     | Some (VarBind t) -> t
     | _ -> raise (undefined_error "variable" name)
 
   (* Lookup a type constructor in the environment. *)
   let lookup_tycon name (e : env) : tycon =
-    match List.Assoc.find e ~equal:Poly.equal name with
+    match List.Assoc.find e ~equal name with
     | Some (TypeBind t) -> t
     | _ -> raise (undefined_error "type" name)
 
@@ -222,10 +228,10 @@ module HM () = struct
     let tvar = "'" ^ Int.to_string n in
     TyVar (ref (Unbound (tvar, !current_level)))
 
-  (* Generalize a type by replacing all the unbound type variables with
-     quantified type variables. In order to decide whether to generalize an
-     unbound type variable, we just check if its level is deeper than the
-     current scope, i.e. the scope containing the let binding. *)
+  (* Generalize a type by replacing the unbound type variables with quantified
+     type variables. In order to decide whether to generalize an unbound type
+     variable, we just check if its level is deeper than the current scope, i.e.
+     the scope containing the let binding. *)
   let rec gen (ty : ty) : ty =
     match force ty with
     | TyVar { contents = Unbound (id, lvl) } when lvl > !current_level ->
@@ -247,7 +253,7 @@ module HM () = struct
 
   (* Instantiate a polytype by replacing all the quantified type variables with
      fresh unbound type variables. Ensure that the same type variable ID gets
-     mapped to the same unbound type variable by using a (id, ty) Hashtbl. *)
+     mapped to the same unbound type variable by using an (id, ty) Hashtbl. *)
   let inst ?tbl (pty : ty) : ty =
     let tbl =
       (* If a hash table is provided, use it. Otherwise, create a new one. *)
@@ -281,21 +287,6 @@ module HM () = struct
       | ty -> ty
     in
     inst' pty
-
-  (* Instantiate a type constructor into a type with fresh unbound vars. Returns
-     the underlying record type for unifying with a record literal, as well as a
-     TyName or TyApp for returning in infer. *)
-  let inst_tycon (tc : tycon) : ty * ty =
-    (* Fold over tc.type_params and build up a tyapp, while also adding to a
-       hash table. Then, instantiate the type with the hash table. *)
-    let tbl = Hashtbl.create (module String) in
-    let tyapp =
-      List.fold_right tc.type_params ~init:(TyName tc.name) ~f:(fun id acc ->
-          let tv = fresh_unbound_var () in
-          Hashtbl.add_exn tbl ~key:id ~data:tv;
-          TyApp (acc, tv))
-    in
-    (tyapp, inst ~tbl (TyRecord (tc.name, tc.ty)))
 
   (* Occurs check: check if a type variable occurs in a type. If it does, raise
      an exception. Otherwise, update the type variable's level to be the minimum
@@ -333,7 +324,7 @@ module HM () = struct
        Unbound. *)
     let t1, t2 = (force t1, force t2) in
     match (t1, t2) with
-    | _ when Poly.equal t1 t2 ->
+    | _ when equal t1 t2 ->
         () (* The types are trivially equal (e.g. TyBool). *)
     | TyVar tv, ty | ty, TyVar tv ->
         (* If either type is a type variable, ensure that the type variable does
@@ -347,11 +338,10 @@ module HM () = struct
         unify f1 f2;
         unify d1 d2
     | TyRecord (id1, fds1), TyRecord (id2, fds2)
-      when Poly.equal id1 id2
-           && Poly.equal (List.length fds1) (List.length fds2) ->
+      when equal id1 id2 && equal (List.length fds1) (List.length fds2) ->
         (* Both types are records with the same name and number of fields. *)
         let unify_fld (id1, ty1) (id2, ty2) =
-          if not (Poly.equal id1 id2) then raise (unify_failed ty1 ty2)
+          if not (equal id1 id2) then raise (unify_failed ty1 ty2)
           else unify ty1 ty2
         in
         (* Unify their corresponding fields. *)
@@ -359,11 +349,37 @@ module HM () = struct
     | TyApp (a1, b1), TyApp (a2, b2) ->
         unify a1 a2;
         unify b1 b2
-    | TyName a, TyName b when Poly.equal a b ->
-        () (* The type names are the same. *)
+    | TyName a, TyName b when equal a b -> () (* The type names are the same. *)
     | _ ->
         (* Unification has failed. *)
         raise (unify_failed t1 t2)
+
+  (* Perform a type application to get the underlying record type. *)
+  let concretize env ty =
+    (* Hash table to keep track of type parameters we've applied so far. *)
+    let tbl = Hashtbl.create (module String) in
+    let rec concretize' ty =
+      (* We only need to concretize the top-level, so we can project and unify
+         the record type. *)
+      match ty with
+      | TyName id -> lookup_tycon id env
+      | TyApp (t1, t2) -> (
+          (* Concrete the type on the left. *)
+          let tc = concretize' t1 in
+          match tc.type_params with
+          | [] -> failwith "unexpected: empty type params"
+          | hd :: tl ->
+              (* Substitute in the type on the right, by popping the first type
+                 parameter off the type constructor, and binding it to the type
+                 in the hash table. *)
+              Hashtbl.add_exn tbl ~key:hd ~data:t2;
+              { tc with type_params = tl })
+      | _ -> failwith "expected TyName or TyApp"
+    in
+    let tc = concretize' ty in
+    (* Pass the table of applied type parameters into inst to substitute for the
+       QVars. *)
+    inst ~tbl (TyRecord (tc.name, tc.ty))
 
   let rec infer (env : env) (exp : exp) : texp =
     match exp with
@@ -400,11 +416,16 @@ module HM () = struct
     | ERecord (tname, rec_lit) ->
         (* Look up the declared type constructor for the type name on the record
            literal. *)
-        let tcon = lookup_tycon tname env in
+        let tc = lookup_tycon tname env in
         (* Instantiate the type constructor into a type with fresh unbound
-           variables. It returns both a type application representation as well
-           as the underlying record type. *)
-        let ty_app, ty_dec = inst_tycon tcon in
+           variables. Fold over tc.type_params and build up a tyapp. *)
+        let ty_app =
+          List.fold_right tc.type_params ~init:(TyName tc.name) ~f:(fun _ acc ->
+              TyApp (acc, fresh_unbound_var ()))
+        in
+        (* Apply the type application to get a concrete record type that we can
+           unify *)
+        let ty_dec = concretize env ty_app in
         (* Infer the types of all the fields in the literal. *)
         let rec_lit = List.map ~f:(fun (id, x) -> (id, infer env x)) rec_lit in
         (* Synthesize a record type with the types of those fields. *)
@@ -418,11 +439,12 @@ module HM () = struct
     | EProj (rcd, fld) -> (
         (* Infer the type of the expression we're projecting on. *)
         let rcd = infer env rcd in
+        let ty_rcd = concretize env (typ rcd) in
         (* Check that it's actually a record. *)
-        match typ rcd with
+        match ty_rcd with
         | TyRecord (name, rec_ty) -> (
             (* Check that it has the field we're accessing. *)
-            match List.Assoc.find rec_ty ~equal:Poly.equal fld with
+            match List.Assoc.find rec_ty ~equal fld with
             (* Return the field's type in the record. *)
             | Some ty -> TEProj (rcd, fld, ty)
             | _ -> raise (missing_field fld name))
@@ -566,9 +588,6 @@ module HM () = struct
 end
 
 (* TODO: Some example programs. *)
-(* 1. Polymorphic identity function *)
-(* 2. fun x -> let y = fun z -> z in y *)
-(* 3. fun x -> let y = x in y *)
 (* 4. fun x -> let y = fun z -> x z in y *)
 (* 5. if true then false else true *)
 (* 6. let f: 'a -> 'a = fun x -> x *)
@@ -578,40 +597,37 @@ end
 (* 10. two conflicting record types *)
 (* 11. fix *)
 
-let%test "id" =
-  let open HM () in
-  let prog = ([], ELet (("id", None, ELam ("x", EVar "x")), EVar "id")) in
-  let x = typecheck_prog prog in
-  let t = typ x in
-  Poly.equal (ty_pretty t) "('2 -> '2)"
+(* 1. Polymorphic identity function *)
+(* let%test "id" = let open HM () in let prog = ([], ELet (("id", None, ELam
+   ("x", EVar "x")), EVar "id")) in let x = typecheck_prog prog in let t = typ x
+   in Poly.equal (ty_pretty t) "('2 -> '2)"
 
-let%test "2" =
-  let open HM () in
-  let prog =
-    ([], ELam ("x", ELet (("y", None, ELam ("z", EVar "z")), EVar "y")))
-  in
-  let x = typecheck_prog prog in
-  let t = typ x in
-  Poly.equal (ty_pretty t) "('0 -> ('3 -> '3))"
+   (* 2. fun x -> let y = fun z -> z in y *) let%test "2" = let open HM () in
+   let prog = ([], ELam ("x", ELet (("y", None, ELam ("z", EVar "z")), EVar
+   "y"))) in let x = typecheck_prog prog in let t = typ x in Poly.equal
+   (ty_pretty t) "('0 -> ('3 -> '3))"
 
-let%test "fix" =
-  let open HM () in
-  let fix =
-    ELetRec
-      ( [
-          ("fix", None, ELam ("f", EApp (EVar "f", EApp (EVar "fix", EVar "f"))));
-        ],
-        EVar "fix" )
-  in
-  let x = typecheck_prog ([], fix) in
-  let t = typ x in
-  Poly.equal (ty_pretty t) "(('4 -> '4) -> '4)"
+   (* 3. fun x -> let y = x in y *) let%test "3" = let open HM () in let prog =
+   ([], ELam ("x", ELet (("y", None, EVar "x"), EVar "y"))) in let x =
+   typecheck_prog prog in let t = typ x in Poly.equal (ty_pretty t) "('0 -> '0)"
+
+   (* 4. fun x -> let y = fun z -> x z in y *) let%test "4" = let open HM () in
+   let prog = ( [], ELam ( "x", ELet (("y", None, ELam ("z", EApp (EVar "x",
+   EVar "z"))), EVar "y") ) ) in let x = typecheck_prog prog in let t = typ x in
+   Poly.equal (ty_pretty t) "('0 -> ('3 -> '3))"
+
+   let%test "fix" = let open HM () in let fix = ELetRec ( [ ("fix", None, ELam
+   ("f", EApp (EVar "f", EApp (EVar "fix", EVar "f")))); ], EVar "fix" ) in let
+   x = typecheck_prog ([], fix) in let t = typ x in Poly.equal (ty_pretty t)
+   "(('4 -> '4) -> '4)" *)
 
 let%test "tdecl" =
   let open HM () in
   let prog =
     ( [ { name = "Foo"; type_params = [ "'a" ]; ty = [ ("x", QVar "'a") ] } ],
-      ERecord ("Foo", [ ("x", EBool true) ]) )
+      ELet
+        ( ("r", None, ERecord ("Foo", [ ("x", EBool true) ])),
+          EProj (EVar "r", "x") ) )
   in
   let x = typecheck_prog prog in
   let t = typ x in
