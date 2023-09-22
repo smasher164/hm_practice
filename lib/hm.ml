@@ -587,48 +587,127 @@ module HM () = struct
 end
 
 (* TODO: Some example programs. *)
-(* 4. fun x -> let y = fun z -> x z in y *)
-(* 5. if true then false else true *)
-(* 6. let f: 'a -> 'a = fun x -> x *)
-(* 7. type box 'a = { x: 'a } let r : box bool = box{x = true} *)
-(* 8. type box 'a = { x: 'a } let r = box{x = true} in r.x *)
 (* 9. let rec *)
 (* 10. two conflicting record types *)
 (* 11. fix *)
 
 (* 1. Polymorphic identity function *)
-(* let%test "id" = let open HM () in let prog = ([], ELet (("id", None, ELam
-   ("x", EVar "x")), EVar "id")) in let x = typecheck_prog prog in let t = typ x
-   in Poly.equal (ty_pretty t) "('2 -> '2)"
+let%test "id" =
+  let open HM () in
+  let prog = ([], ELet (("id", None, ELam ("x", EVar "x")), EVar "id")) in
+  let x = typecheck_prog prog in
+  let t = typ x in
+  Poly.equal (ty_pretty t) "('2 -> '2)"
 
-   (* 2. fun x -> let y = fun z -> z in y *) let%test "2" = let open HM () in
-   let prog = ([], ELam ("x", ELet (("y", None, ELam ("z", EVar "z")), EVar
-   "y"))) in let x = typecheck_prog prog in let t = typ x in Poly.equal
-   (ty_pretty t) "('0 -> ('3 -> '3))"
-
-   (* 3. fun x -> let y = x in y *) let%test "3" = let open HM () in let prog =
-   ([], ELam ("x", ELet (("y", None, EVar "x"), EVar "y"))) in let x =
-   typecheck_prog prog in let t = typ x in Poly.equal (ty_pretty t) "('0 -> '0)"
-
-   (* 4. fun x -> let y = fun z -> x z in y *) let%test "4" = let open HM () in
-   let prog = ( [], ELam ( "x", ELet (("y", None, ELam ("z", EApp (EVar "x",
-   EVar "z"))), EVar "y") ) ) in let x = typecheck_prog prog in let t = typ x in
-   Poly.equal (ty_pretty t) "('0 -> ('3 -> '3))"
-
-   let%test "fix" = let open HM () in let fix = ELetRec ( [ ("fix", None, ELam
-   ("f", EApp (EVar "f", EApp (EVar "fix", EVar "f")))); ], EVar "fix" ) in let
-   x = typecheck_prog ([], fix) in let t = typ x in Poly.equal (ty_pretty t)
-   "(('4 -> '4) -> '4)" *)
-
-let%test "tdecl" =
+(* 2. fun x -> let y = fun z -> z in y *)
+let%test "2" =
   let open HM () in
   let prog =
-    ( [ { name = "Foo"; type_params = [ "'a" ]; ty = [ ("x", QVar "'a") ] } ],
+    ([], ELam ("x", ELet (("y", None, ELam ("z", EVar "z")), EVar "y")))
+  in
+  let x = typecheck_prog prog in
+  let t = typ x in
+  Poly.equal (ty_pretty t) "('0 -> ('3 -> '3))"
+
+(* 3. fun x -> let y = x in y *)
+let%test "3" =
+  let open HM () in
+  let prog = ([], ELam ("x", ELet (("y", None, EVar "x"), EVar "y"))) in
+  let x = typecheck_prog prog in
+  let t = typ x in
+  Poly.equal (ty_pretty t) "('0 -> '0)"
+
+(* 4. fun x -> let y = fun z -> x z in y *)
+let%test "4" =
+  let open HM () in
+  let prog =
+    ( [],
+      ELam
+        ( "x",
+          ELet (("y", None, ELam ("z", EApp (EVar "x", EVar "z"))), EVar "y") )
+    )
+  in
+  let x = typecheck_prog prog in
+  let t = typ x in
+  Poly.equal (ty_pretty t) "(('2 -> '3) -> ('2 -> '3))"
+
+(* 5. if true then false else true *)
+let%test "5" =
+  let open HM () in
+  let prog = ([], EIf (EBool true, EBool false, EBool true)) in
+  let x = typecheck_prog prog in
+  let t = typ x in
+  Poly.equal (ty_pretty t) "bool"
+
+(* 6. let f: 'a -> 'a = fun x -> x *)
+let%test "6" =
+  let open HM () in
+  let prog =
+    ( [],
       ELet
-        ( ("r", None, ERecord ("Foo", [ ("x", EBool true) ])),
+        ( ("f", Some (TyArrow (QVar "'a", QVar "'a")), ELam ("x", EVar "x")),
+          EApp (EVar "f", EBool true) ) )
+  in
+  let x = typecheck_prog prog in
+  let t = typ x in
+  Poly.equal (ty_pretty t) "bool"
+
+(* 7. type box 'a = { x: 'a }; let r : box bool = box{x = true} in r *)
+let%test "7" =
+  let open HM () in
+  let prog =
+    ( [ { name = "box"; type_params = [ "'a" ]; ty = [ ("x", QVar "'a") ] } ],
+      ELet
+        ( ( "r",
+            Some (TyApp (TyName "box", TyBool)),
+            ERecord ("box", [ ("x", EBool true) ]) ),
+          EVar "r" ) )
+  in
+  let x = typecheck_prog prog in
+  let t = typ x in
+  Poly.equal (ty_pretty t) "box bool"
+
+(* 8. type box 'a = { x: 'a } let r = box{x = true} in r.x *)
+let%test "7" =
+  let open HM () in
+  let prog =
+    ( [ { name = "box"; type_params = [ "'a" ]; ty = [ ("x", QVar "'a") ] } ],
+      ELet
+        ( ( "r",
+            Some (TyApp (TyName "box", TyBool)),
+            ERecord ("box", [ ("x", EBool true) ]) ),
           EProj (EVar "r", "x") ) )
   in
   let x = typecheck_prog prog in
   let t = typ x in
-  Stdio.print_endline (ty_pretty t);
-  true
+  Poly.equal (ty_pretty t) "bool"
+
+(* 9. let rec f = fun x -> g x and g = fun x -> f x in f *)
+let%test "9" =
+  let open HM () in
+  let prog =
+    ( [],
+      ELetRec
+        ( [
+            ("f", None, ELam ("x", EApp (EVar "g", EVar "x")));
+            ("g", None, ELam ("x", EApp (EVar "f", EVar "x")));
+          ],
+          EVar "f" ) )
+  in
+  let x = typecheck_prog prog in
+  let t = typ x in
+  Poly.equal (ty_pretty t) "('7 -> '6)"
+
+(* let rec fix = fun f -> f (fix f) in fix *)
+let%test "10" =
+  let open HM () in
+  let fix =
+    ELetRec
+      ( [
+          ("fix", None, ELam ("f", EApp (EVar "f", EApp (EVar "fix", EVar "f"))));
+        ],
+        EVar "fix" )
+  in
+  let x = typecheck_prog ([], fix) in
+  let t = typ x in
+  Poly.equal (ty_pretty t) "(('4 -> '4) -> '4)"
