@@ -586,8 +586,10 @@ module HM () = struct
     infer env exp
 end
 
+(* Tests *)
+
 (* 1. Polymorphic identity function *)
-let%test "id" =
+let%test "1" =
   let open HM () in
   let prog = ([], ELet (("id", None, ELam ("x", EVar "x")), EVar "id")) in
   let x = typecheck_prog prog in
@@ -647,7 +649,9 @@ let%test "6" =
   let t = typ x in
   Poly.equal (ty_pretty t) "bool"
 
-(* 7. type box 'a = { x: 'a }; let r : box bool = box{x = true} in r *)
+(*= 7.
+   type box 'a = { x: 'a }
+   let r : box bool = box{x = true} in r *)
 let%test "7" =
   let open HM () in
   let prog =
@@ -662,7 +666,10 @@ let%test "7" =
   let t = typ x in
   Poly.equal (ty_pretty t) "box bool"
 
-(* 8. type box 'a = { x: 'a } let r = box{x = true} in r.x *)
+(*= 8.
+   type box 'a = { x: 'a }
+   let r = box{x = true} in r.x
+*)
 let%test "7" =
   let open HM () in
   let prog =
@@ -677,7 +684,9 @@ let%test "7" =
   let t = typ x in
   Poly.equal (ty_pretty t) "bool"
 
-(* 9. let rec f = fun x -> g x and g = fun x -> f x in f *)
+(*= 9.
+   let rec f = fun x -> g x
+   and g = fun x -> f x in f *)
 let%test "9" =
   let open HM () in
   let prog =
