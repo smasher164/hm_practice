@@ -12,6 +12,10 @@ open Poly
     2. Type name
     3. Instance predicates
     4. instance body
+
+
+    TODO: Qualified types.
+    Note: We can just add the method with its predicate. We don't need to refer back to its enclosing class.
 *)
 
 (* Module HM contains a typechecker for the Damas-Hindley-Milner (DHM) type
@@ -608,8 +612,10 @@ module HM () = struct
   (* Walk a type constructor and make sure any type names or qvars it references
      actually exist. There should be no type variables (unbound/link) in a type
      constructor, since it hasn't instantiated into a type yet. *)
-  let checkTycon names tc =
-    let names = Hash_set.copy names in
+  let checkTycon type_names trait_names tc =
+    (* TODO: check that trait names that are referenced exist and are done in
+       the appropriate places. *)
+    let names = Hash_set.copy type_names in
     List.iter tc.type_params ~f:(fun id -> Hash_set.add names id);
     let rec checkTycon' ty =
       match ty with
@@ -669,7 +675,7 @@ module HM () = struct
         add_instance impl ins);
     (* Walk tycons again to make sure that all type names and qvars are
        referenced. *)
-    List.iter tcl ~f:(checkTycon type_names);
+    List.iter tcl ~f:(checkTycon type_names trait_names);
     infer env exp
 end
 
