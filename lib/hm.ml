@@ -53,9 +53,9 @@ module HM () = struct
          that T is a polytype with an implicit forall 'a in front of it. For
          example, TyArrow(QVar("'a"), TyBool) is equivalent to forall 'a. 'a ->
          Bool *)
-    | TyArrow of ty * ty (* Function type: T1 -> T2 *)
+    | TyArrow of ty list (* Function type: T1 -> T2 *)
     | TyName of id (* Type name: Foo *)
-    | TyApp of ty * ty (* Type application: T1 T2 *)
+    | TyApp of ty list (* Type application: T1 T2 *)
 
   and record_ty = (id * ty) list
 
@@ -121,9 +121,10 @@ module HM () = struct
     | TyVar { contents = Unbound (id, lvl) } ->
         Printf.sprintf "TyVar(Unbound(%s,%d))" id lvl
     | QVar id -> Printf.sprintf "QVar(%s)" id
-    | TyArrow (from, dst) -> "(" ^ ty_debug from ^ " -> " ^ ty_debug dst ^ ")"
+    | TyArrow arr ->
+        "(" ^ String.concat ~sep:" -> " (List.map arr ~f:ty_debug) ^ ")"
     | TyName name -> name
-    | TyApp (ty, param) -> Printf.sprintf "%s %s" (ty_debug ty) (ty_debug param)
+    | TyApp app -> String.concat ~sep:" " (List.map app ~f:ty_debug)
 
   let tycon_debug = tycon_string ty_debug
 
@@ -135,10 +136,10 @@ module HM () = struct
     | TyVar { contents = Link _ } -> failwith "unexpected: Link"
     | TyVar { contents = Unbound (id, _) } -> id
     | QVar id -> id
-    | TyArrow (from, dst) -> "(" ^ ty_pretty from ^ " -> " ^ ty_pretty dst ^ ")"
+    | TyArrow arr ->
+        "(" ^ String.concat ~sep:" -> " (List.map arr ~f:ty_pretty) ^ ")"
     | TyName name -> name
-    | TyApp (ty, param) ->
-        Printf.sprintf "%s %s" (ty_pretty ty) (ty_pretty param)
+    | TyApp app -> String.concat ~sep:" " (List.map app ~f:ty_pretty)
 
   let tycon_pretty = tycon_string ty_pretty
 
@@ -239,12 +240,12 @@ module HM () = struct
            than our current level. That is, it doesn't appear in the
            environment. *)
         QVar id
-    | TyArrow (from, dst) ->
-        (* Generalize the type vars in the parameter and return types. *)
-        TyArrow (gen from, gen dst)
-    | TyApp (a, b) ->
+    | TyArrow arr ->
+        (* Generalize the type vars in the arrow type. *)
+        TyArrow (List.map arr ~f:gen)
+    | TyApp app ->
         (* Generalize the type vars in the type application. *)
-        TyApp (gen a, gen b)
+        TyApp (List.map app ~f:gen)
     | TyRecord (id, flds) ->
         (* Generalize the type vars in the record fields. *)
         let gen_fld (id, ty) = (id, gen ty) in
@@ -274,12 +275,12 @@ module HM () = struct
               let tv = fresh_unbound_var () in
               Hashtbl.add_exn tbl ~key:id ~data:tv;
               tv)
-      | TyArrow (from, dst) ->
-          (* Instantiate the type vars in the parameter and return types. *)
-          TyArrow (inst' from, inst' dst)
-      | TyApp (a, b) ->
+      | TyArrow arr ->
+          (* Instantiate the type vars in the arrow type. *)
+          TyArrow (List.map arr ~f:inst')
+      | TyApp app ->
           (* Instantiate the type vars in the type application. *)
-          TyApp (inst' a, inst' b)
+          TyApp (List.map app ~f:inst')
       | TyRecord (id, flds) ->
           (* Instantiate the type vars in the record fields. *)
           let inst_fld (id, ty) = (id, inst' ty) in
@@ -306,13 +307,12 @@ module HM () = struct
         let min_lvl = min src_lvl tgt_lvl in
         (* Update the tgt's level to be the minimum. *)
         tgt := Unbound (id, min_lvl)
-    | TyArrow (from, dst) ->
-        (* Check that src occurs in the parameter and return type. *)
-        occurs src from;
-        occurs src dst
-    | TyApp (a, b) ->
-        occurs src a;
-        occurs src b
+    | TyArrow arr ->
+        (* Check that src occurs in the arrow type. *)
+        List.iter arr ~f:(fun t -> occurs src t)
+    | TyApp app ->
+        (* Check that src occurs in the type application. *)
+        List.iter app ~f:(fun t -> occurs src t)
     | TyRecord (_, flds) ->
         (* Check that src occurs in the field types. *)
         List.iter ~f:(fun (_, ty) -> occurs src ty) flds
@@ -332,11 +332,11 @@ module HM () = struct
         occurs tv ty;
         (* Link the type variable to the type. *)
         tv := Link ty
-    | TyArrow (f1, d1), TyArrow (f2, d2) ->
-        (* If both types are function types, unify their parameters with each
-           other and their return types with each other. *)
-        unify f1 f2;
-        unify d1 d2
+    | TyArrow arr1, TyArrow arr2 when List.length arr1 = List.length arr2 ->
+        (* If both types are function types, unify their corresponding types
+           with each other. *)
+        List.iter2_exn arr1 arr2 ~f:unify
+    (* unify f1 f2; unify d1 d2 *)
     | TyRecord (id1, fds1), TyRecord (id2, fds2)
       when equal id1 id2 && equal (List.length fds1) (List.length fds2) ->
         (* Both types are records with the same name and number of fields. *)
@@ -346,40 +346,38 @@ module HM () = struct
         in
         (* Unify their corresponding fields. *)
         List.iter2_exn ~f:unify_fld fds1 fds2
-    | TyApp (a1, b1), TyApp (a2, b2) ->
-        unify a1 a2;
-        unify b1 b2
+    | TyApp app1, TyApp app2 when List.length app1 = List.length app2 ->
+        (* If both types are type applications, unify their corresponding types
+           with each other. *)
+        List.iter2_exn app1 app2 ~f:unify
     | TyName a, TyName b when equal a b -> () (* The type names are the same. *)
     | _ ->
         (* Unification has failed. *)
         raise (unify_failed t1 t2)
 
-  (* Perform a type application to get the underlying record type. *)
+  (* Perform a type application to get the underlying record type. We only need
+     to concretize the top-level, so we can project and unify the record
+     type. *)
   let concretize env ty =
-    (* Hash table to keep track of type parameters we've applied so far. *)
-    let tbl = Hashtbl.create (module String) in
-    let rec concretize' ty =
-      (* We only need to concretize the top-level, so we can project and unify
-         the record type. *)
-      match ty with
-      | TyName id -> lookup_tycon id env
-      | TyApp (t1, t2) -> (
-          (* Concrete the type on the left. *)
-          let tc = concretize' t1 in
-          match tc.type_params with
-          | [] -> failwith "unexpected: empty type params"
-          | hd :: tl ->
-              (* Substitute in the type on the right, by popping the first type
-                 parameter off the type constructor, and binding it to the type
-                 in the hash table. *)
-              Hashtbl.add_exn tbl ~key:hd ~data:t2;
-              { tc with type_params = tl })
-      | _ -> failwith "expected TyName or TyApp"
-    in
-    let tc = concretize' ty in
-    (* Pass the table of applied type parameters into inst to substitute for the
-       QVars. *)
-    inst ~tbl (TyRecord (tc.name, tc.ty))
+    match ty with
+    | TyName id ->
+        let tc = lookup_tycon id env in
+        TyRecord (tc.name, tc.ty)
+    | TyApp (TyName id :: tl) ->
+        let tc = lookup_tycon id env in
+        (* Hash table to keep track of type parameters we've applied. *)
+        let tbl =
+          (* Zip over type parameter names and the type arguments to build an
+             association list that can be added to the hash table. *)
+          match List.zip tc.type_params tl with
+          | Ok alist -> Hashtbl.of_alist_exn (module String) alist
+          | Unequal_lengths ->
+              failwith "incorrect number of arguments in type application"
+        in
+        (* Pass the table of applied type parameters into inst to substitute for
+           the QVars. *)
+        inst ~tbl (TyRecord (tc.name, tc.ty))
+    | _ -> failwith "expected TyName or TyApp"
 
   let rec infer (env : env) (exp : exp) : texp =
     match exp with
@@ -399,7 +397,7 @@ module HM () = struct
            and synthesize an arrow type going from the argument to the
            result. *)
         let ty_res = fresh_unbound_var () in
-        let ty_arr = TyArrow (typ arg, ty_res) in
+        let ty_arr = TyArrow [ typ arg; ty_res ] in
         (* Unify it with the function's type. *)
         unify (typ fn) ty_arr;
         (* Return the result type. *)
@@ -412,16 +410,22 @@ module HM () = struct
         (* Typecheck the body of the lambda with the extended environment. *)
         let body = infer env' body in
         (* Return a synthesized arrow type from the parameter to the body. *)
-        TELam (param, body, TyArrow (ty_param, typ body))
+        TELam (param, body, TyArrow [ ty_param; typ body ])
     | ERecord (tname, rec_lit) ->
         (* Look up the declared type constructor for the type name on the record
            literal. *)
         let tc = lookup_tycon tname env in
         (* Instantiate the type constructor into a type with fresh unbound
-           variables. Fold over tc.type_params and build up a tyapp. *)
+           variables. *)
         let ty_app =
-          List.fold_right tc.type_params ~init:(TyName tc.name) ~f:(fun _ acc ->
-              TyApp (acc, fresh_unbound_var ()))
+          (* No type parameters, so all we need is the type name. *)
+          if List.is_empty tc.type_params then TyName tc.name
+          else
+            (* Map over the type parameters to build up a TyApp with fresh
+               unbound variables. *)
+            TyApp
+              (TyName tc.name
+              :: List.map tc.type_params ~f:(fun _ -> fresh_unbound_var ()))
         in
         (* Apply the type application to get a concrete record type that we can
            unify *)
@@ -548,12 +552,8 @@ module HM () = struct
     let rec checkTycon' ty =
       match ty with
       | TyVar _ -> failwith "unexpected: TyVar"
-      | TyArrow (from, dst) ->
-          checkTycon' from;
-          checkTycon' dst
-      | TyApp (a, b) ->
-          checkTycon' a;
-          checkTycon' b
+      | TyArrow arr -> List.iter arr ~f:checkTycon'
+      | TyApp app -> List.iter app ~f:checkTycon'
       | TyRecord (tname, flds) ->
           if not (Hash_set.mem names tname) then
             raise (undefined_error "type" tname);
@@ -642,7 +642,7 @@ let%test "6" =
   let prog =
     ( [],
       ELet
-        ( ("f", Some (TyArrow (QVar "'a", QVar "'a")), ELam ("x", EVar "x")),
+        ( ("f", Some (TyArrow [ QVar "'a"; QVar "'a" ]), ELam ("x", EVar "x")),
           EApp (EVar "f", EBool true) ) )
   in
   let x = typecheck_prog prog in
@@ -658,7 +658,7 @@ let%test "7" =
     ( [ { name = "box"; type_params = [ "'a" ]; ty = [ ("x", QVar "'a") ] } ],
       ELet
         ( ( "r",
-            Some (TyApp (TyName "box", TyBool)),
+            Some (TyApp [ TyName "box"; TyBool ]),
             ERecord ("box", [ ("x", EBool true) ]) ),
           EVar "r" ) )
   in
@@ -670,13 +670,13 @@ let%test "7" =
    type box 'a = { x: 'a }
    let r = box{x = true} in r.x
 *)
-let%test "7" =
+let%test "8" =
   let open HM () in
   let prog =
     ( [ { name = "box"; type_params = [ "'a" ]; ty = [ ("x", QVar "'a") ] } ],
       ELet
         ( ( "r",
-            Some (TyApp (TyName "box", TyBool)),
+            Some (TyApp [ TyName "box"; TyBool ]),
             ERecord ("box", [ ("x", EBool true) ]) ),
           EProj (EVar "r", "x") ) )
   in
@@ -700,7 +700,7 @@ let%test "9" =
   in
   let x = typecheck_prog prog in
   let t = typ x in
-  Poly.equal (ty_pretty t) "('7 -> '6)"
+  Poly.equal (ty_pretty t) "('6 -> '7)"
 
 (* let rec fix = fun f -> f (fix f) in fix *)
 let%test "10" =
