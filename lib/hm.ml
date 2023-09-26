@@ -275,6 +275,10 @@ module HM () = struct
               let tv = fresh_unbound_var () in
               Hashtbl.add_exn tbl ~key:id ~data:tv;
               tv)
+      | TyName id as ty -> (
+          match Hashtbl.find tbl id with
+          | Some tv -> tv
+          | None -> ty)
       | TyArrow arr ->
           (* Instantiate the type vars in the arrow type. *)
           TyArrow (List.map arr ~f:inst')
@@ -562,8 +566,7 @@ module HM () = struct
           if not (Hash_set.mem names tname) then
             raise (undefined_error "type" tname)
       | TyBool -> ()
-      | QVar id ->
-          if not (Hash_set.mem names id) then raise (undefined_error "type" id)
+      | QVar _ -> failwith "unexpected: QVar"
     in
     checkTycon' (TyRecord (tc.name, tc.ty))
 
@@ -655,7 +658,7 @@ let%test "6" =
 let%test "7" =
   let open HM () in
   let prog =
-    ( [ { name = "box"; type_params = [ "'a" ]; ty = [ ("x", QVar "'a") ] } ],
+    ( [ { name = "box"; type_params = [ "'a" ]; ty = [ ("x", TyName "'a") ] } ],
       ELet
         ( ( "r",
             Some (TyApp [ TyName "box"; TyBool ]),
@@ -673,7 +676,7 @@ let%test "7" =
 let%test "8" =
   let open HM () in
   let prog =
-    ( [ { name = "box"; type_params = [ "'a" ]; ty = [ ("x", QVar "'a") ] } ],
+    ( [ { name = "box"; type_params = [ "'a" ]; ty = [ ("x", TyName "'a") ] } ],
       ELet
         ( ( "r",
             Some (TyApp [ TyName "box"; TyBool ]),

@@ -615,6 +615,7 @@ module HM () = struct
   let checkTycon type_names trait_names tc =
     (* TODO: check that trait names that are referenced exist and are done in
        the appropriate places. *)
+    let _ = trait_names in
     let names = Hash_set.copy type_names in
     List.iter tc.type_params ~f:(fun id -> Hash_set.add names id);
     let rec checkTycon' ty =
