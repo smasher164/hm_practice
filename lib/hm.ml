@@ -379,7 +379,7 @@ module HM () = struct
               failwith "incorrect number of arguments in type application"
         in
         (* Pass the table of applied type parameters into inst to substitute for
-           the QVars. *)
+           the TyNames. *)
         inst ~tbl (TyRecord (tc.name, tc.ty))
     | _ -> failwith "expected TyName or TyApp"
 
