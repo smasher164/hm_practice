@@ -588,7 +588,7 @@ end
 
 (* Tests *)
 
-(* 1. Polymorphic identity function *)
+(* 1. let id = fun x -> x in id *)
 let%test "1" =
   let open HM () in
   let prog = ([], ELet (("id", None, ELam ("x", EVar "x")), EVar "id")) in
@@ -702,7 +702,7 @@ let%test "9" =
   let t = typ x in
   Poly.equal (ty_pretty t) "('6 -> '7)"
 
-(* let rec fix = fun f -> f (fix f) in fix *)
+(* 10. let rec fix = fun f -> f (fix f) in fix *)
 let%test "10" =
   let open HM () in
   let fix =
