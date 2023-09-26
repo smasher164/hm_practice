@@ -642,8 +642,6 @@ module HM () = struct
         List.iter tl ~f:(check_well_formed env)
     | _ -> failwith "not well formed"
 
-  (* TODO: allow typeclass instances on function types *)
-
   (* Typecheck a program. *)
   let typecheck_prog : prog -> texp =
    fun { tycons = tcl; traits = trl; instances = inl; body = exp } ->
