@@ -26,7 +26,7 @@ module HM () = struct
     | ELetRec of let_decl list * exp (* let rec <decls> in <exp> *)
 
   and record_lit = (id * exp) list
-  and let_decl = id * ty option * exp
+  and let_decl = id * qty option * exp
 
   (* A typed expression *)
   and texp =
@@ -41,18 +41,21 @@ module HM () = struct
     | TELetRec of tlet_decl list * texp * ty
 
   and tyrecord_lit = (id * texp) list
-  and tlet_decl = id * ty option * texp
+  and tlet_decl = id * qty option * texp
+
+  (* A Quantified type. Should be read as forall p1..pn. ty, where p1..pn are
+     the type parameters. It is separated from ty because in HM, a forall can
+     only be at the top level of a type. *)
+  and qty = {
+    type_params : id list;
+    ty : ty;
+  }
 
   (* A type *)
   and ty =
     | TyBool (* Bool *)
     | TyRecord of id * record_ty (* Record: Foo{x: Bool, y: Bool} *)
     | TyVar of tv ref (* Type variable: held behind a mutable reference. *)
-    | QVar of id
-      (* Quantified type variable: If a type T contains a QVar("'a"), it implies
-         that T is a polytype with an implicit forall 'a in front of it. For
-         example, TyArrow(QVar("'a"), TyBool) is equivalent to forall 'a. 'a ->
-         Bool *)
     | TyArrow of ty list (* Function type: T1 -> T2 *)
     | TyName of id (* Type name: Foo *)
     | TyApp of ty list (* Type application: T1 T2 *)
@@ -67,7 +70,7 @@ module HM () = struct
     | Link of ty (* Link type variable: Holds a reference to a type. *)
 
   (* Type declaration/constructor. All type declarations are nominal records. *)
-  and tycon = {
+  type tycon = {
     name : id;
     type_params : id list;
     ty : record_ty;
@@ -75,14 +78,14 @@ module HM () = struct
 
   (* A program is a list of type declarations and an expression to be
      evaluated. *)
-  and prog = tycon list * exp
+  type prog = tycon list * exp
 
-  and bind =
-    | VarBind of ty (* A variable binding maps to the variable's type. *)
+  type bind =
+    | VarBind of qty (* A variable binding maps to a quantified type. *)
     | TypeBind of tycon (* A type binding maps to a type constructor. *)
 
   (* The environment is a list of bindings. *)
-  and env = (id * bind) list
+  type env = (id * bind) list
 
   (* Dereference a type variable by following all the links and get the
      underlying type. *)
@@ -96,7 +99,6 @@ module HM () = struct
     match ty with
     | TyBool -> "TyBool"
     | TyRecord _ -> "TyRecord"
-    | QVar _ -> "QVar"
     | TyVar _ -> "TyVar"
     | TyArrow _ -> "TyArrow"
     | TyName _ -> "TyName"
@@ -120,7 +122,6 @@ module HM () = struct
         Printf.sprintf "TyVar(Link(%s))" (ty_debug ty)
     | TyVar { contents = Unbound (id, lvl) } ->
         Printf.sprintf "TyVar(Unbound(%s,%d))" id lvl
-    | QVar id -> Printf.sprintf "QVar(%s)" id
     | TyArrow arr ->
         "(" ^ String.concat ~sep:" -> " (List.map arr ~f:ty_debug) ^ ")"
     | TyName name -> name
@@ -135,7 +136,6 @@ module HM () = struct
         Printf.sprintf "%s{%s}" id (ty_fields ty_pretty flds)
     | TyVar { contents = Link _ } -> failwith "unexpected: Link"
     | TyVar { contents = Unbound (id, _) } -> id
-    | QVar id -> id
     | TyArrow arr ->
         "(" ^ String.concat ~sep:" -> " (List.map arr ~f:ty_pretty) ^ ")"
     | TyName name -> name
@@ -184,7 +184,7 @@ module HM () = struct
     | _ -> raise (type_error "TyRecord" (ty_kind ty))
 
   (* Lookup a variable's type in the environment. *)
-  let lookup_var_type name (e : env) : ty =
+  let lookup_var_type name (e : env) : qty =
     match List.Assoc.find e ~equal name with
     | Some (VarBind t) -> t
     | _ -> raise (undefined_error "variable" name)
@@ -229,53 +229,74 @@ module HM () = struct
     let tvar = "'" ^ Int.to_string n in
     TyVar (ref (Unbound (tvar, !current_level)))
 
-  (* Generalize a type by replacing the unbound type variables with quantified
-     type variables. In order to decide whether to generalize an unbound type
-     variable, we just check if its level is deeper than the current scope, i.e.
-     the scope containing the let binding. *)
-  let rec gen (ty : ty) : ty =
-    match force ty with
-    | TyVar { contents = Unbound (id, lvl) } when lvl > !current_level ->
-        (* Generalize this unbound type variable only if its level is deeper
-           than our current level. That is, it doesn't appear in the
-           environment. *)
-        QVar id
-    | TyArrow arr ->
-        (* Generalize the type vars in the arrow type. *)
-        TyArrow (List.map arr ~f:gen)
-    | TyApp app ->
-        (* Generalize the type vars in the type application. *)
-        TyApp (List.map app ~f:gen)
-    | TyRecord (id, flds) ->
-        (* Generalize the type vars in the record fields. *)
-        let gen_fld (id, ty) = (id, gen ty) in
-        TyRecord (id, List.map ~f:gen_fld flds)
-    | ty -> ty
+  (* Create and initialize a hash table of ids and fresh unbound type
+     variables. *)
+  let create_table_for_type_params l =
+    match
+      Hashtbl.create_mapped
+        (module String)
+        ~get_key:Fn.id
+        ~get_data:(fun _ -> fresh_unbound_var ())
+        l
+    with
+    | `Ok tbl -> tbl
+    | `Duplicate_keys _ -> failwith "unreachable: duplicate keys in type params"
 
-  (* Instantiate a polytype by replacing all the quantified type variables with
-     fresh unbound type variables. Ensure that the same type variable ID gets
+  (* The environment stores quantified types, but sometimes, we need to
+     associate a non-generalized type to a variable, e.g. the ELam and ELetRec
+     rules. This function converts a type into a quantified type. *)
+  let dont_generalize ty : qty = { type_params = []; ty }
+
+  (* Generalize a type by constructing a quantified type containing type
+     parameters corresponding to its unbound type variables. In order to decide
+     whether to generalize an unbound type variable, we just check if its level
+     is deeper than the current scope, i.e. the scope containing the let
+     binding. *)
+  let gen (ty : ty) : qty =
+    let type_params = Hash_set.create (module String) in
+    let rec gen' (ty : ty) : unit =
+      match force ty with
+      | TyVar { contents = Unbound (id, lvl) } when lvl > !current_level ->
+          (* Generalize this unbound type variable only if its level is deeper
+             than our current level. That is, it doesn't appear in the
+             environment. *)
+          Hash_set.add type_params id
+      | TyArrow arr ->
+          (* Generalize the type vars in the arrow type. *)
+          List.iter arr ~f:gen'
+      | TyApp app ->
+          (* Generalize the type vars in the type application. *)
+          List.iter app ~f:gen'
+      | TyRecord (_, flds) ->
+          (* Generalize the type vars in the record fields. *)
+          List.iter ~f:(fun (_, ty) -> gen' ty) flds
+      | _ -> ()
+    in
+    gen' ty;
+    let type_params = Hash_set.to_list type_params |> List.sort ~compare in
+    { type_params; ty }
+
+  (* Instantiate a quantified type by replacing all the quantified type
+     variables with fresh unbound type variables. Ensure that the same ID gets
      mapped to the same unbound type variable by using an (id, ty) Hashtbl. *)
-  let inst ?tbl (pty : ty) : ty =
+  let inst ?tbl (qty : qty) : ty =
     let tbl =
       (* If a hash table is provided, use it. Otherwise, create a new one. *)
       match tbl with
-      | None -> Hashtbl.create (module String)
+      | None -> create_table_for_type_params qty.type_params
       | Some tbl -> tbl
     in
     let rec inst' (ty : ty) =
       match force ty with
-      | QVar id -> (
+      | TyVar { contents = Unbound (id, _) } as tv -> (
           (* If we see a quantified type variable, check if it's in the hash
              table. *)
           match Hashtbl.find tbl id with
           | Some tv -> tv (* If it is, return the type variable. *)
-          | None ->
-              (* Otherwise, create a fresh monotype, and add it into the
-                 table. *)
-              let tv = fresh_unbound_var () in
-              Hashtbl.add_exn tbl ~key:id ~data:tv;
-              tv)
+          | None -> tv)
       | TyName id as ty -> (
+          (* In a type annotation, the quantified type variable will be referred
+             to by a type name. *)
           match Hashtbl.find tbl id with
           | Some tv -> tv
           | None -> ty)
@@ -291,7 +312,7 @@ module HM () = struct
           TyRecord (id, List.map ~f:inst_fld flds)
       | ty -> ty
     in
-    inst' pty
+    inst' qty.ty
 
   (* Occurs check: check if a type variable occurs in a type. If it does, raise
      an exception. Otherwise, update the type variable's level to be the minimum
@@ -360,27 +381,31 @@ module HM () = struct
         raise (unify_failed t1 t2)
 
   (* Perform a type application to get the underlying record type. We only need
-     to concretize the top-level, so we can project and unify the record
+     to apply the top-level, so that we can project and unify the record
      type. *)
-  let concretize env ty =
+  let apply_type env ty =
     match ty with
     | TyName id ->
+        (* Nothing to apply, just look up the type constructor, and return its
+           underlying type. *)
         let tc = lookup_tycon id env in
         TyRecord (tc.name, tc.ty)
-    | TyApp (TyName id :: tl) ->
+    | TyApp (TyName id :: type_args) ->
+        (* Look up the type constructor, and apply the type arguments for each
+           of its type parameters. *)
         let tc = lookup_tycon id env in
         (* Hash table to keep track of type parameters we've applied. *)
         let tbl =
           (* Zip over type parameter names and the type arguments to build an
              association list that can be added to the hash table. *)
-          match List.zip tc.type_params tl with
+          match List.zip tc.type_params type_args with
           | Ok alist -> Hashtbl.of_alist_exn (module String) alist
           | Unequal_lengths ->
               failwith "incorrect number of arguments in type application"
         in
         (* Pass the table of applied type parameters into inst to substitute for
            the TyNames. *)
-        inst ~tbl (TyRecord (tc.name, tc.ty))
+        inst ~tbl { type_params = []; ty = TyRecord (tc.name, tc.ty) }
     | _ -> failwith "expected TyName or TyApp"
 
   let rec infer (env : env) (exp : exp) : texp =
@@ -410,7 +435,7 @@ module HM () = struct
         (* Instantiate a fresh type variable for the lambda parameter, and
            extend the environment with the param and its type. *)
         let ty_param = fresh_unbound_var () in
-        let env' = (param, VarBind ty_param) :: env in
+        let env' = (param, VarBind (dont_generalize ty_param)) :: env in
         (* Typecheck the body of the lambda with the extended environment. *)
         let body = infer env' body in
         (* Return a synthesized arrow type from the parameter to the body. *)
@@ -433,7 +458,7 @@ module HM () = struct
         in
         (* Apply the type application to get a concrete record type that we can
            unify *)
-        let ty_dec = concretize env ty_app in
+        let ty_dec = apply_type env ty_app in
         (* Infer the types of all the fields in the literal. *)
         let rec_lit = List.map ~f:(fun (id, x) -> (id, infer env x)) rec_lit in
         (* Synthesize a record type with the types of those fields. *)
@@ -448,7 +473,7 @@ module HM () = struct
         (* Infer the type of the expression we're projecting on. *)
         let rcd = infer env rcd in
         (* Concretize the type in case it's a type application. *)
-        let ty_rcd = concretize env (typ rcd) in
+        let ty_rcd = apply_type env (typ rcd) in
         (* Check that it's actually a record. *)
         let name, rec_ty = expect_tyrecord ty_rcd in
         (* Check that it has the field we're accessing. *)
@@ -516,16 +541,17 @@ module HM () = struct
               in
               (* Extend the environment by prepending the binding and its
                  type. *)
-              (id, VarBind ty_decl) :: env'
+              (id, VarBind (dont_generalize ty_decl)) :: env'
         in
         let env' : env = List.fold_right ~f:extend_env ~init:env decls in
         (* Using the extended environment, infer the types of the
            right-hand-side of all the let declarations. *)
-        let infer_let : id * bind -> let_decl -> id * ty option * texp =
+        let infer_let : id * bind -> let_decl -> tlet_decl =
          fun (id, bind) (_, ann, rhs) ->
           let ty_bind = expect_varbind bind in
           let rhs = infer env' rhs in
-          unify ty_bind (typ rhs);
+          unify ty_bind.ty (typ rhs);
+          (* It's safe to do .ty because ty_bind is not generalized. *)
           (id, ann, rhs)
         in
         (* We use zip here to map over the environment and the corresponding let
@@ -550,7 +576,7 @@ module HM () = struct
   (* Walk a type constructor and make sure any type names or qvars it references
      actually exist. There should be no type variables (unbound/link) in a type
      constructor, since it hasn't instantiated into a type yet. *)
-  let checkTycon names tc =
+  let checkTycon names (tc : tycon) =
     let names = Hash_set.copy names in
     List.iter tc.type_params ~f:(fun id -> Hash_set.add names id);
     let rec checkTycon' ty =
@@ -567,7 +593,6 @@ module HM () = struct
           if not (Hash_set.mem names tname) then
             raise (undefined_error "type" tname)
       | TyBool -> ()
-      | QVar _ -> failwith "unexpected: QVar"
     in
     checkTycon' (TyRecord (tc.name, tc.ty))
 
@@ -646,7 +671,13 @@ let%test "6" =
   let prog =
     ( [],
       ELet
-        ( ("f", Some (TyArrow [ QVar "'a"; QVar "'a" ]), ELam ("x", EVar "x")),
+        ( ( "f",
+            Some
+              {
+                type_params = [ "'a" ];
+                ty = TyArrow [ TyName "'a"; TyName "'a" ];
+              },
+            ELam ("x", EVar "x") ),
           EApp (EVar "f", EBool true) ) )
   in
   let x = typecheck_prog prog in
@@ -662,7 +693,7 @@ let%test "7" =
     ( [ { name = "box"; type_params = [ "'a" ]; ty = [ ("x", TyName "'a") ] } ],
       ELet
         ( ( "r",
-            Some (TyApp [ TyName "box"; TyBool ]),
+            Some { type_params = []; ty = TyApp [ TyName "box"; TyBool ] },
             ERecord ("box", [ ("x", EBool true) ]) ),
           EVar "r" ) )
   in
@@ -680,7 +711,7 @@ let%test "8" =
     ( [ { name = "box"; type_params = [ "'a" ]; ty = [ ("x", TyName "'a") ] } ],
       ELet
         ( ( "r",
-            Some (TyApp [ TyName "box"; TyBool ]),
+            Some { type_params = []; ty = TyApp [ TyName "box"; TyBool ] },
             ERecord ("box", [ ("x", EBool true) ]) ),
           EProj (EVar "r", "x") ) )
   in
