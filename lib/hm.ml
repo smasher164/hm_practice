@@ -557,7 +557,8 @@ module HM () = struct
       match ty with
       | TyVar _ -> failwith "unexpected: TyVar"
       | TyArrow arr -> List.iter arr ~f:checkTycon'
-      | TyApp app -> List.iter app ~f:checkTycon'
+      | TyApp (TyName _ :: _ as app) -> List.iter app ~f:checkTycon'
+      | TyApp _ -> failwith "head of the type application should be a type name"
       | TyRecord (tname, flds) ->
           if not (Hash_set.mem names tname) then
             raise (undefined_error "type" tname);
