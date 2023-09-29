@@ -47,8 +47,12 @@ module HM_SP () = struct
   and qty = {
     type_params : id list;
     (* Add constraints *)
+    constraints : pred list;
     ty : ty;
   }
+
+  (* ("Show", TyName "'a") *)
+  and pred = id * ty
 
   (* A type *)
   and ty =
@@ -91,7 +95,7 @@ module HM_SP () = struct
   (* body : record_lit; } *)
 
   (* Maps a type variable to a list of trait predicates. *)
-  type pred = { tbl : (id, id list) Hashtbl.t }
+  (* type pred = { tbl : (id, id list) Hashtbl.t } *)
 
   (* Maps a trait name to a list of types implementing it. *)
   (* type impl = { tbl : (id, (ty, instance_decl) Hashtbl.t) Hashtbl.t } *)
@@ -143,8 +147,17 @@ module HM_SP () = struct
     Printf.sprintf "type %s %s = %s" tc.name (ty_fields f tc.ty)
       (f (TyRecord (tc.name, tc.ty)))
 
+  let pred_string f (id, ty) : string = id ^ " " ^ f ty
+
+  let constraints f pl =
+    if List.is_empty pl then ""
+    else String.concat ~sep:", " (List.map pl ~f:(pred_string f)) ^ " => "
+
+  let foralls tp =
+    if List.is_empty tp then "" else "forall " ^ ty_params tp ^ ". "
+
   let qty_string f (qty : qty) =
-    "forall " ^ ty_params qty.type_params ^ ". " ^ f qty.ty
+    foralls qty.type_params ^ constraints f qty.constraints ^ f qty.ty
 
   let rec ty_debug ty =
     match ty with
@@ -204,10 +217,18 @@ module HM_SP () = struct
       (Printf.sprintf "failed to unify type %s with %s" (ty_debug t1)
          (ty_debug t2))
 
-  let overlapping_instance (trait_name, qty, _) =
-    OverlappingInstance
-      (Printf.sprintf "overlapping instance for %s %s" trait_name
-         (qty_pretty qty))
+  let overlapping_instance : instance_decl -> exn =
+   fun (trait_name, qty, _) ->
+    let msg =
+      if List.is_empty qty.type_params then
+        Printf.sprintf "overlapping instance for %s %s" trait_name
+          (ty_pretty qty.ty)
+      else
+        Printf.sprintf "overlapping instance for forall %s. %s %s"
+          (ty_params qty.type_params)
+          trait_name (ty_pretty qty.ty)
+    in
+    OverlappingInstance msg
 
   let expect_varbind bind =
     match bind with
@@ -265,12 +286,11 @@ module HM_SP () = struct
     in
     overlap' a.ty b.ty
 
-  let add_instance env impl ((trait_name, qty, _) as ins) : env =
+  let add_instance impl ((trait_name, qty, _) as ins) =
     let l = Hashtbl.find_or_add impl.tbl trait_name ~default:(fun () -> []) in
     List.iter l ~f:(fun ty ->
         if overlap ty qty then raise (overlapping_instance ins));
-    Hashtbl.set impl.tbl ~key:trait_name ~data:(qty :: l);
-    env (* TODO *)
+    Hashtbl.set impl.tbl ~key:trait_name ~data:(qty :: l)
 
   (* ins.body *)
   (* unify ins.body's type with ins.qty. *)
@@ -312,7 +332,7 @@ module HM_SP () = struct
   (* The environment stores quantified types, but sometimes, we need to
      associate a non-generalized type to a variable, e.g. the ELam and ELetRec
      rules. This function converts a type into a quantified type. *)
-  let dont_generalize ty : qty = { type_params = []; ty }
+  let dont_generalize ty : qty = { type_params = []; constraints = []; ty }
 
   (* Generalize a type by constructing a quantified type containing type
      parameters corresponding to its unbound type variables. In order to decide
@@ -341,7 +361,8 @@ module HM_SP () = struct
     in
     gen' ty;
     let type_params = Hash_set.to_list type_params |> List.sort ~compare in
-    { type_params; ty }
+    (* TODO: { type_params; ty } *)
+    { type_params; constraints = []; ty }
 
   (* Instantiate a quantified type by replacing all the quantified type
      variables with fresh unbound type variables. Ensure that the same ID gets
@@ -472,7 +493,9 @@ module HM_SP () = struct
         in
         (* Pass the table of applied type parameters into inst to substitute for
            the TyNames. *)
-        inst ~tbl { type_params = []; ty = TyRecord (tc.name, tc.ty) }
+        inst ~tbl
+          (*{ type_params = []; ty = TyRecord (tc.name, tc.ty) } *)
+          { type_params = []; constraints = []; ty = TyRecord (tc.name, tc.ty) }
     | _ -> failwith "expected TyName or TyApp"
 
   let rec infer (env : env) (exp : exp) : texp =
@@ -481,6 +504,7 @@ module HM_SP () = struct
     | EVar name ->
         (* Variable is being used. Look up its type in the environment, *)
         let var_ty = lookup_var_type name env in
+        Stdio.print_endline (qty_pretty var_ty);
         (* instantiate its type by replacing all of its quantified type
            variables with fresh unbound type variables.*)
         TEVar (name, inst var_ty)
@@ -686,6 +710,17 @@ module HM_SP () = struct
     in
     check_well_formed' qty.ty *)
 
+  let prepend_defs (td : trait_decl) (env : env) =
+    List.fold_right td.def ~init:env ~f:(fun (id, ty) acc ->
+        let qty : qty =
+          {
+            type_params = [ td.type_param ];
+            constraints = [ (td.name, TyName td.type_param) ];
+            ty;
+          }
+        in
+        (id, VarBind qty) :: acc)
+
   (* Typecheck a program. *)
   let typecheck_prog : prog -> texp =
    fun { tycons = tcl; traits = trl; instances = inl; body = exp } ->
@@ -703,6 +738,7 @@ module HM_SP () = struct
           (tc.name, TypeBind tc) :: acc)
     in
     let env =
+      (* Add trait methods to environment. *)
       List.fold_right trl ~init:env ~f:(fun td acc ->
           (* First, check if it collides with a type name. *)
           (if Hash_set.mem type_names td.name then
@@ -711,17 +747,15 @@ module HM_SP () = struct
              match Hash_set.strict_add trait_names td.name with
              | Ok () -> ()
              | Error _ -> raise (duplicate_definition td.name));
-          (td.name, TraitBind td) :: acc)
+          (td.name, TraitBind td) :: prepend_defs td acc)
     in
-    let env : env =
-      List.fold_right inl ~init:env ~f:(fun ((trait_name, _, _) as ins) acc ->
-          if not (Hash_set.mem trait_names trait_name) then
-            raise (undefined_error "trait" trait_name)
-            (* else check_well_formed env ins.qty; *)
-            (* Do we really need to check well-formedness here if typechecking
-               an instance declaration handles this?*)
-          else add_instance acc impl ins)
-    in
+    List.iter inl ~f:(fun ((trait_name, _, _) as ins) ->
+        if not (Hash_set.mem trait_names trait_name) then
+          raise (undefined_error "trait" trait_name)
+          (* else check_well_formed env ins.qty; *)
+          (* Do we really need to check well-formedness here if typechecking an
+             instance declaration handles this?*)
+        else add_instance impl ins);
     (* Walk tycons again to make sure that all type names and qvars are
        referenced. TODO: Is this necessary? *)
     List.iter tcl ~f:(checkTycon type_names trait_names);
@@ -747,18 +781,47 @@ let%test "1" =
       traits = [ { name = "Eq"; type_param = "'a"; def = [] } ];
       instances =
         [
-          ("Eq", { type_params = []; ty = TyBool }, []);
+          ("Eq", { type_params = []; constraints = []; ty = TyBool }, []);
           ( "Eq",
-            { type_params = [ "'a" ]; ty = TyApp [ TyName "box"; TyName "'a" ] },
+            {
+              type_params = [ "'a" ];
+              constraints = [];
+              ty = TyApp [ TyName "box"; TyName "'a" ];
+            },
             [] );
-          ("Eq", { type_params = [ "'a" ]; ty = TyName "'a" }, []);
+          ( "Eq",
+            { type_params = [ "'a" ]; constraints = []; ty = TyName "'a" },
+            [] );
         ];
       body = EBool true;
     }
   in
   assert_raises
     (fun () -> typecheck_prog prog)
-    (OverlappingInstance "overlapping instance for Eq forall 'a. box 'a")
+    (OverlappingInstance "overlapping instance for forall 'a. Eq 'a")
+
+let%test "2" =
+  let open HM_SP () in
+  let prog =
+    {
+      tycons = [];
+      traits =
+        [
+          {
+            name = "Eq";
+            type_param = "'a";
+            def = [ ("eq", TyArrow [ TyName "'a"; TyName "'a"; TyBool ]) ];
+          };
+        ];
+      instances = [];
+      body = EVar "eq";
+    }
+  in
+  let tprog = typecheck_prog prog in
+  let t = typ tprog in
+  (* pretty printer might need to look up constraints *)
+  Stdio.print_endline (ty_pretty t);
+  true
 
 (* try ignore (typecheck_prog prog); false with OverlappingInstance "overlapping
    instance for Eq forall 'a. box 'a" -> true *)
