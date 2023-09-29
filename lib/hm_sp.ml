@@ -250,15 +250,21 @@ module HM_SP () = struct
 
   (* Lookup a variable's type in the environment. *)
   let lookup_var_type name (e : env) : qty =
-    match List.Assoc.find e ~equal name with
+    match lookup name e with
     | Some (VarBind t) -> t
     | _ -> raise (undefined_error "variable" name)
 
   (* Lookup a type constructor in the environment. *)
   let lookup_tycon name (e : env) : tycon =
-    match List.Assoc.find e ~equal name with
+    match lookup name e with
     | Some (TypeBind t) -> t
     | _ -> raise (undefined_error "type" name)
+
+  (* Lookup a trait declaration in the environment. *)
+  let lookup_trait name e : trait_decl =
+    match lookup name e with
+    | Some (TraitBind t) -> t
+    | _ -> raise (undefined_error "trait" name)
 
   (* Get the type of a typed expression. *)
   let typ (texp : texp) : ty =
