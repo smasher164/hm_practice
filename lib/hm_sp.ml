@@ -79,14 +79,15 @@ module HM_SP () = struct
     ty : record_ty;
   }
 
+  type instance_decl = qty * record_lit
+
   type trait_decl = {
     name : id;
     type_param : id;
     (* TODO: add superclass constraints *)
     def : record_ty;
+    instances : instance_decl list;
   }
-
-  type instance_decl = id * qty * record_lit
 
   (* TODO: instance predicates *)
 
@@ -106,7 +107,6 @@ module HM_SP () = struct
   type prog = {
     tycons : tycon list;
     traits : trait_decl list;
-    instances : instance_decl list;
     body : exp;
   }
 
@@ -217,8 +217,8 @@ module HM_SP () = struct
       (Printf.sprintf "failed to unify type %s with %s" (ty_debug t1)
          (ty_debug t2))
 
-  let overlapping_instance : instance_decl -> exn =
-   fun (trait_name, qty, _) ->
+  let overlapping_instance : id -> qty -> exn =
+   fun trait_name qty ->
     let msg =
       if List.is_empty qty.type_params then
         Printf.sprintf "overlapping instance for %s %s" trait_name
@@ -286,11 +286,22 @@ module HM_SP () = struct
     in
     overlap' a.ty b.ty
 
-  let add_instance impl ((trait_name, qty, _) as ins) =
+  let add_instance trait_name ins_list (ins_qty, _) =
+    List.iter ins_list ~f:(fun qty ->
+        if overlap qty ins_qty then
+          raise (overlapping_instance trait_name ins_qty));
+    ins_qty :: ins_list
+
+  (*= let add_instance impl ((trait_name, qty, _) as ins) =
     let l = Hashtbl.find_or_add impl.tbl trait_name ~default:(fun () -> []) in
     List.iter l ~f:(fun ty ->
         if overlap ty qty then raise (overlapping_instance ins));
     Hashtbl.set impl.tbl ~key:trait_name ~data:(qty :: l)
+
+  let check_overlap trait_name impl_set ((ins_qty, _) as ins) : qty list =
+    List.iter impl_set ~f:(fun qty ->
+        if overlap qty ins_qty then raise (overlapping_instance trait_name ins));
+    ins_qty :: impl_set *)
 
   (* ins.body *)
   (* unify ins.body's type with ins.qty. *)
@@ -315,6 +326,9 @@ module HM_SP () = struct
     Int.incr gensym_counter;
     let tvar = "'" ^ Int.to_string n in
     TyVar (ref (Unbound (tvar, !current_level)))
+
+  let constraint_set : (id, id Hash_set.t) Hashtbl.t =
+    Hashtbl.create (module String)
 
   (* Create and initialize a hash table of ids and fresh unbound type
      variables. *)
@@ -504,7 +518,7 @@ module HM_SP () = struct
     | EVar name ->
         (* Variable is being used. Look up its type in the environment, *)
         let var_ty = lookup_var_type name env in
-        Stdio.print_endline (qty_pretty var_ty);
+        (* Stdio.print_endline (qty_pretty var_ty); *)
         (* instantiate its type by replacing all of its quantified type
            variables with fresh unbound type variables.*)
         TEVar (name, inst var_ty)
@@ -711,6 +725,7 @@ module HM_SP () = struct
     check_well_formed' qty.ty *)
 
   let prepend_defs (td : trait_decl) (env : env) =
+    (* TODO: should this be a fold_right? doesn't really matter though *)
     List.fold_right td.def ~init:env ~f:(fun (id, ty) acc ->
         let qty : qty =
           {
@@ -723,15 +738,15 @@ module HM_SP () = struct
 
   (* Typecheck a program. *)
   let typecheck_prog : prog -> texp =
-   fun { tycons = tcl; traits = trl; instances = inl; body = exp } ->
+   fun { tycons = tcl; traits = trl; body = exp } ->
     let type_names = Hash_set.create (module String) in
     let trait_names = Hash_set.create (module String) in
-    let impl : impl = { tbl = Hashtbl.create (module String) } in
+    (* let impl : impl = { tbl = Hashtbl.create (module String) } in *)
     (* Do an initial pass over type declarations to check for duplicates and add
        their names to a Hash_set for checking their definitions. Also add these
        bindings to an environment that can be passed to infer. *)
     let env =
-      List.fold_right tcl ~init:[] ~f:(fun tc acc ->
+      List.fold_left tcl ~init:[] ~f:(fun acc tc ->
           (match Hash_set.strict_add type_names tc.name with
           | Ok () -> ()
           | Error _ -> raise (duplicate_definition tc.name));
@@ -739,7 +754,7 @@ module HM_SP () = struct
     in
     let env =
       (* Add trait methods to environment. *)
-      List.fold_right trl ~init:env ~f:(fun td acc ->
+      List.fold_left trl ~init:env ~f:(fun acc td ->
           (* First, check if it collides with a type name. *)
           (if Hash_set.mem type_names td.name then
              raise (duplicate_definition td.name)
@@ -747,15 +762,17 @@ module HM_SP () = struct
              match Hash_set.strict_add trait_names td.name with
              | Ok () -> ()
              | Error _ -> raise (duplicate_definition td.name));
+          ignore
+            (List.fold_left td.instances ~init:[] ~f:(add_instance td.name));
           (td.name, TraitBind td) :: prepend_defs td acc)
     in
-    List.iter inl ~f:(fun ((trait_name, _, _) as ins) ->
-        if not (Hash_set.mem trait_names trait_name) then
-          raise (undefined_error "trait" trait_name)
-          (* else check_well_formed env ins.qty; *)
-          (* Do we really need to check well-formedness here if typechecking an
-             instance declaration handles this?*)
-        else add_instance impl ins);
+    (* List.iter inl ~f:(fun ((trait_name, _, _) as ins) -> if not (Hash_set.mem
+       trait_names trait_name) then raise (undefined_error "trait"
+       trait_name) *)
+    (* else check_well_formed env ins.qty; *)
+    (* Do we really need to check well-formedness here if typechecking an
+       instance declaration handles this?*)
+    (* else add_instance impl ins); *)
     (* Walk tycons again to make sure that all type names and qvars are
        referenced. TODO: Is this necessary? *)
     List.iter tcl ~f:(checkTycon type_names trait_names);
@@ -768,7 +785,8 @@ let assert_raises f e =
   try
     ignore (f ());
     false
-  with exn -> equal exn e
+  with exn -> (* Stdio.print_endline (Exn.to_string exn); *)
+              equal exn e
 
 let%test "1" =
   let open HM_SP () in
@@ -778,20 +796,25 @@ let%test "1" =
         [
           { name = "box"; type_params = [ "'a" ]; ty = [ ("x", TyName "'a") ] };
         ];
-      traits = [ { name = "Eq"; type_param = "'a"; def = [] } ];
-      instances =
+      traits =
         [
-          ("Eq", { type_params = []; constraints = []; ty = TyBool }, []);
-          ( "Eq",
-            {
-              type_params = [ "'a" ];
-              constraints = [];
-              ty = TyApp [ TyName "box"; TyName "'a" ];
-            },
-            [] );
-          ( "Eq",
-            { type_params = [ "'a" ]; constraints = []; ty = TyName "'a" },
-            [] );
+          {
+            name = "Eq";
+            type_param = "'a";
+            def = [];
+            instances =
+              [
+                ({ type_params = []; constraints = []; ty = TyBool }, []);
+                ( {
+                    type_params = [ "'a" ];
+                    constraints = [];
+                    ty = TyApp [ TyName "box"; TyName "'a" ];
+                  },
+                  [] );
+                ( { type_params = [ "'a" ]; constraints = []; ty = TyName "'a" },
+                  [] );
+              ];
+          };
         ];
       body = EBool true;
     }
@@ -811,9 +834,9 @@ let%test "2" =
             name = "Eq";
             type_param = "'a";
             def = [ ("eq", TyArrow [ TyName "'a"; TyName "'a"; TyBool ]) ];
+            instances = [];
           };
         ];
-      instances = [];
       body = EVar "eq";
     }
   in

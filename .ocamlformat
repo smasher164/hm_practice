@@ -3,3 +3,4 @@ version = 0.26.0
 type-decl = sparse
 wrap-comments = true
 break-cases = fit-or-vertical
+margin = 80
