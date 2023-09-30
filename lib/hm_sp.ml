@@ -77,6 +77,7 @@ module HM_SP () = struct
   type tycon = {
     name : id;
     type_params : id list;
+    constraints : pred list;
     ty : record_ty;
   }
 
@@ -397,8 +398,13 @@ module HM_SP () = struct
     in
     Hash_set.add set trait_name
 
-  let union_traits : constraint_set -> id -> id Hash_set.t -> unit =
-   fun cset_dst tyvar_id cset_src ->
+  let union_traits : constraint_set -> ty -> id Hash_set.t -> unit =
+   fun cset_dst ty cset_src ->
+    let tyvar_id =
+      match ty with
+      | TyVar { contents = Unbound (id, _) } -> id
+      | _ -> failwith "unreachable"
+    in
     let set =
       Hashtbl.find_or_add cset_dst tyvar_id ~default:(fun () ->
           Hash_set.create (module String))
@@ -448,7 +454,9 @@ module HM_SP () = struct
           match Hashtbl.find tbl id with
           | Some tv ->
               (match Hashtbl.find cnt_table id with
-              | Some traits -> union_traits constraint_set id traits
+              | Some traits ->
+                  union_traits constraint_set tv
+                    traits (* wrong shouldn't be id. *)
               | None -> ());
               tv (* If it is, return the type variable. *)
           | None -> tv)
@@ -458,7 +466,8 @@ module HM_SP () = struct
           match Hashtbl.find tbl id with
           | Some tv ->
               (match Hashtbl.find cnt_table id with
-              | Some traits -> union_traits constraint_set id traits
+              (* wrong shouldn't be id. *)
+              | Some traits -> union_traits constraint_set tv traits
               | None -> ());
               tv
           | None -> ty)
@@ -569,7 +578,11 @@ module HM_SP () = struct
            the TyNames. *)
         inst ~tbl
           (*{ type_params = []; ty = TyRecord (tc.name, tc.ty) } *)
-          { type_params = []; constraints = []; ty = TyRecord (tc.name, tc.ty) }
+          {
+            type_params = tc.type_params;
+            constraints = tc.constraints;
+            ty = TyRecord (tc.name, tc.ty);
+          }
     | _ -> failwith "expected TyName or TyApp"
 
   let rec infer (env : env) (exp : exp) : texp =
@@ -854,7 +867,12 @@ let%test "1" =
     {
       tycons =
         [
-          { name = "box"; type_params = [ "'a" ]; ty = [ ("x", TyName "'a") ] };
+          {
+            name = "box";
+            type_params = [ "'a" ];
+            constraints = [];
+            ty = [ ("x", TyName "'a") ];
+          };
         ];
       traits =
         [
