@@ -405,7 +405,8 @@ module HM () = struct
         in
         (* Pass the table of applied type parameters into inst to substitute for
            the TyNames. *)
-        inst ~tbl { type_params = []; ty = TyRecord (tc.name, tc.ty) }
+        inst ~tbl
+          { type_params = tc.type_params; ty = TyRecord (tc.name, tc.ty) }
     | _ -> failwith "expected TyName or TyApp"
 
   let rec infer (env : env) (exp : exp) : texp =
