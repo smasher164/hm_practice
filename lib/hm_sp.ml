@@ -53,6 +53,7 @@ module HM_SP () = struct
 
   (* ("Show", TyName "'a") *)
   and pred = id * ty
+  and constraint_set = (id, id Hash_set.t) Hashtbl.t
 
   (* A type *)
   and ty =
@@ -333,8 +334,7 @@ module HM_SP () = struct
     let tvar = "'" ^ Int.to_string n in
     TyVar (ref (Unbound (tvar, !current_level)))
 
-  let constraint_set : (id, id Hash_set.t) Hashtbl.t =
-    Hashtbl.create (module String)
+  let constraint_set : constraint_set = Hashtbl.create (module String)
 
   (* Create and initialize a hash table of ids and fresh unbound type
      variables. *)
@@ -384,6 +384,46 @@ module HM_SP () = struct
     (* TODO: { type_params; ty } *)
     { type_params; constraints = []; ty }
 
+  let print_constraints () =
+    let f hs = String.concat ~sep:", " (Hash_set.to_list hs) in
+    Hashtbl.iteri constraint_set ~f:(fun ~key ~data ->
+        Stdio.printf "id: %s -> data: %s" key (f data))
+
+  let add_trait : constraint_set -> id -> id -> unit =
+   fun cnt_set tyvar_id trait_name ->
+    let set =
+      Hashtbl.find_or_add cnt_set tyvar_id ~default:(fun () ->
+          Hash_set.create (module String))
+    in
+    Hash_set.add set trait_name
+
+  let union_traits : constraint_set -> id -> id Hash_set.t -> unit =
+   fun cset_dst tyvar_id cset_src ->
+    let set =
+      Hashtbl.find_or_add cset_dst tyvar_id ~default:(fun () ->
+          Hash_set.create (module String))
+    in
+    Hash_set.iter cset_src ~f:(fun trait_name -> Hash_set.add set trait_name)
+
+  let build_cnt_table (qty : qty) : constraint_set =
+    let m = Hashtbl.create (module String) in
+    List.iter qty.constraints ~f:(fun (trait_name, ty) ->
+        match ty with
+        | TyVar { contents = Unbound (tyvar_id, _) } ->
+            let set =
+              Hashtbl.find_or_add m tyvar_id ~default:(fun () ->
+                  Hash_set.create (module String))
+            in
+            Hash_set.add set trait_name
+        | TyName ty_name ->
+            let set =
+              Hashtbl.find_or_add m ty_name ~default:(fun () ->
+                  Hash_set.create (module String))
+            in
+            Hash_set.add set trait_name
+        | _ -> failwith "unreachable");
+    m
+
   (* Instantiate a quantified type by replacing all the quantified type
      variables with fresh unbound type variables. Ensure that the same ID gets
      mapped to the same unbound type variable by using an (id, ty) Hashtbl. *)
@@ -394,19 +434,33 @@ module HM_SP () = struct
       | None -> create_table_for_type_params qty.type_params
       | Some tbl -> tbl
     in
+    let cnt_table : constraint_set = build_cnt_table qty in
+    (*= for each cnt in qty.constraints
+          for ty_par_id in instanceLookupSimplify cnt
+            ty = tbl[ty_par_id]
+            for (trait_name, ty_var) instanceLookupSimplify ty
+              constraint_st[ty_var] += trait_name *)
     let rec inst' (ty : ty) =
       match force ty with
       | TyVar { contents = Unbound (id, _) } as tv -> (
           (* If we see a quantified type variable, check if it's in the hash
              table. *)
           match Hashtbl.find tbl id with
-          | Some tv -> tv (* If it is, return the type variable. *)
+          | Some tv ->
+              (match Hashtbl.find cnt_table id with
+              | Some traits -> union_traits constraint_set id traits
+              | None -> ());
+              tv (* If it is, return the type variable. *)
           | None -> tv)
       | TyName id as ty -> (
           (* In a type annotation, the quantified type variable will be referred
              to by a type name. *)
           match Hashtbl.find tbl id with
-          | Some tv -> tv
+          | Some tv ->
+              (match Hashtbl.find cnt_table id with
+              | Some traits -> union_traits constraint_set id traits
+              | None -> ());
+              tv
           | None -> ty)
       | TyArrow arr ->
           (* Instantiate the type vars in the arrow type. *)
@@ -850,6 +904,7 @@ let%test "2" =
   let t = typ tprog in
   (* pretty printer might need to look up constraints *)
   Stdio.print_endline (ty_pretty t);
+  print_constraints ();
   true
 
 (* try ignore (typecheck_prog prog); false with OverlappingInstance "overlapping
