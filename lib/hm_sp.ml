@@ -390,6 +390,10 @@ module HM_SP () = struct
     Hashtbl.iteri constraint_set ~f:(fun ~key ~data ->
         Stdio.printf "id: %s -> data: %s" key (f data))
 
+  let find_cset cset tyvar_id =
+    Hashtbl.find_or_add cset tyvar_id ~default:(fun () ->
+        Hash_set.create (module String))
+
   let add_trait : constraint_set -> id -> id -> unit =
    fun cnt_set tyvar_id trait_name ->
     let set =
@@ -403,7 +407,7 @@ module HM_SP () = struct
     let tyvar_id =
       match ty with
       | TyVar { contents = Unbound (id, _) } -> id
-      | _ -> failwith "unreachable"
+      | _ -> failwith "TODO"
     in
     let set =
       Hashtbl.find_or_add cset_dst tyvar_id ~default:(fun () ->
@@ -411,36 +415,35 @@ module HM_SP () = struct
     in
     Hash_set.iter cset_src ~f:(fun trait_name -> Hash_set.add set trait_name)
 
-  let build_cnt_table (qty : qty) : constraint_set =
-    let m = Hashtbl.create (module String) in
+  let build_cset (env : env) (qty : qty) : constraint_set =
+    ignore env;
+    let cset = Hashtbl.create (module String) in
     List.iter qty.constraints ~f:(fun (trait_name, ty) ->
         match ty with
         | TyVar { contents = Unbound (tyvar_id, _) } ->
-            let set =
-              Hashtbl.find_or_add m tyvar_id ~default:(fun () ->
-                  Hash_set.create (module String))
-            in
-            Hash_set.add set trait_name
-        | TyName ty_name ->
-            let set =
-              Hashtbl.find_or_add m ty_name ~default:(fun () ->
-                  Hash_set.create (module String))
-            in
-            Hash_set.add set trait_name
+            add_trait cset tyvar_id trait_name
+        | TyName ty_name -> add_trait cset ty_name trait_name
         | _ -> failwith "unreachable");
-    m
+    cset
+
+  let propagate : env -> constraint_set -> id -> ty -> unit =
+   fun env cset id tv ->
+    ignore env;
+    match Hashtbl.find cset id with
+    | Some traits -> union_traits constraint_set tv traits
+    | None -> ()
 
   (* Instantiate a quantified type by replacing all the quantified type
      variables with fresh unbound type variables. Ensure that the same ID gets
      mapped to the same unbound type variable by using an (id, ty) Hashtbl. *)
-  let inst ?tbl (qty : qty) : ty =
+  let inst ?tbl (env : env) (qty : qty) : ty =
     let tbl =
       (* If a hash table is provided, use it. Otherwise, create a new one. *)
       match tbl with
       | None -> create_table_for_type_params qty.type_params
       | Some tbl -> tbl
     in
-    let cnt_table : constraint_set = build_cnt_table qty in
+    let cset : constraint_set = build_cset env qty in
     (*= for each cnt in qty.constraints
           for ty_par_id in instanceLookupSimplify cnt
             ty = tbl[ty_par_id]
@@ -453,11 +456,7 @@ module HM_SP () = struct
              table. *)
           match Hashtbl.find tbl id with
           | Some tv ->
-              (match Hashtbl.find cnt_table id with
-              | Some traits ->
-                  union_traits constraint_set tv
-                    traits (* wrong shouldn't be id. *)
-              | None -> ());
+              propagate env cset id tv;
               tv (* If it is, return the type variable. *)
           | None -> tv)
       | TyName id as ty -> (
@@ -465,10 +464,7 @@ module HM_SP () = struct
              to by a type name. *)
           match Hashtbl.find tbl id with
           | Some tv ->
-              (match Hashtbl.find cnt_table id with
-              (* wrong shouldn't be id. *)
-              | Some traits -> union_traits constraint_set tv traits
-              | None -> ());
+              propagate env cset id tv;
               tv
           | None -> ty)
       | TyArrow arr ->
@@ -484,6 +480,40 @@ module HM_SP () = struct
       | ty -> ty
     in
     inst' qty.ty
+
+  (* Perform a type application to get the underlying record type. We only need
+     to apply the top-level, so that we can project and unify the record
+     type. *)
+  let apply_type env ty =
+    match ty with
+    | TyName id ->
+        (* Nothing to apply, just look up the type constructor, and return its
+           underlying type. *)
+        let tc = lookup_tycon id env in
+        TyRecord (tc.name, tc.ty)
+    | TyApp (TyName id :: type_args) ->
+        (* Look up the type constructor, and apply the type arguments for each
+           of its type parameters. *)
+        let tc = lookup_tycon id env in
+        (* Hash table to keep track of type parameters we've applied. *)
+        let tbl =
+          (* Zip over type parameter names and the type arguments to build an
+             association list that can be added to the hash table. *)
+          match List.zip tc.type_params type_args with
+          | Ok alist -> Hashtbl.of_alist_exn (module String) alist
+          | Unequal_lengths ->
+              failwith "incorrect number of arguments in type application"
+        in
+        (* Pass the table of applied type parameters into inst to substitute for
+           the TyNames. *)
+        inst env ~tbl
+          (*{ type_params = []; ty = TyRecord (tc.name, tc.ty) } *)
+          {
+            type_params = tc.type_params;
+            constraints = tc.constraints;
+            ty = TyRecord (tc.name, tc.ty);
+          }
+    | _ -> failwith "expected TyName or TyApp"
 
   (* Occurs check: check if a type variable occurs in a type. If it does, raise
      an exception. Otherwise, update the type variable's level to be the minimum
@@ -515,7 +545,7 @@ module HM_SP () = struct
     | _ -> ()
 
   (* Unify two types. If they are not unifiable, raise an exception. *)
-  let rec unify (t1 : ty) (t2 : ty) : unit =
+  let rec unify (env : env) (t1 : ty) (t2 : ty) : unit =
     (* Follow all the links. If we see any type variables, they will only be
        Unbound. *)
     let t1, t2 = (force t1, force t2) in
@@ -531,59 +561,27 @@ module HM_SP () = struct
     | TyArrow arr1, TyArrow arr2 when List.length arr1 = List.length arr2 ->
         (* If both types are function types, unify their corresponding types
            with each other. *)
-        List.iter2_exn arr1 arr2 ~f:unify
+        List.iter2_exn arr1 arr2 ~f:(unify env)
     (* unify f1 f2; unify d1 d2 *)
     | TyRecord (id1, fds1), TyRecord (id2, fds2)
       when equal id1 id2 && equal (List.length fds1) (List.length fds2) ->
         (* Both types are records with the same name and number of fields. *)
         let unify_fld (id1, ty1) (id2, ty2) =
           if not (equal id1 id2) then raise (unify_failed ty1 ty2)
-          else unify ty1 ty2
+          else unify env ty1 ty2
         in
         (* Unify their corresponding fields. *)
         List.iter2_exn ~f:unify_fld fds1 fds2
     | TyApp app1, TyApp app2 when List.length app1 = List.length app2 ->
         (* If both types are type applications, unify their corresponding types
            with each other. *)
-        List.iter2_exn app1 app2 ~f:unify
+        List.iter2_exn app1 app2 ~f:(unify env)
+    | (TyApp _ as app), other | other, (TyApp _ as app) ->
+        unify env (apply_type env app) other
     | TyName a, TyName b when equal a b -> () (* The type names are the same. *)
     | _ ->
         (* Unification has failed. *)
         raise (unify_failed t1 t2)
-
-  (* Perform a type application to get the underlying record type. We only need
-     to apply the top-level, so that we can project and unify the record
-     type. *)
-  let apply_type env ty =
-    match ty with
-    | TyName id ->
-        (* Nothing to apply, just look up the type constructor, and return its
-           underlying type. *)
-        let tc = lookup_tycon id env in
-        TyRecord (tc.name, tc.ty)
-    | TyApp (TyName id :: type_args) ->
-        (* Look up the type constructor, and apply the type arguments for each
-           of its type parameters. *)
-        let tc = lookup_tycon id env in
-        (* Hash table to keep track of type parameters we've applied. *)
-        let tbl =
-          (* Zip over type parameter names and the type arguments to build an
-             association list that can be added to the hash table. *)
-          match List.zip tc.type_params type_args with
-          | Ok alist -> Hashtbl.of_alist_exn (module String) alist
-          | Unequal_lengths ->
-              failwith "incorrect number of arguments in type application"
-        in
-        (* Pass the table of applied type parameters into inst to substitute for
-           the TyNames. *)
-        inst ~tbl
-          (*{ type_params = []; ty = TyRecord (tc.name, tc.ty) } *)
-          {
-            type_params = tc.type_params;
-            constraints = tc.constraints;
-            ty = TyRecord (tc.name, tc.ty);
-          }
-    | _ -> failwith "expected TyName or TyApp"
 
   let rec infer (env : env) (exp : exp) : texp =
     match exp with
@@ -594,7 +592,7 @@ module HM_SP () = struct
         (* Stdio.print_endline (qty_pretty var_ty); *)
         (* instantiate its type by replacing all of its quantified type
            variables with fresh unbound type variables.*)
-        TEVar (name, inst var_ty)
+        TEVar (name, inst env var_ty)
     | EApp (fn, arg) ->
         (* To typecheck a function application, first infer the types of the
            function and the argument. *)
@@ -606,7 +604,7 @@ module HM_SP () = struct
         let ty_res = fresh_unbound_var () in
         let ty_arr = TyArrow [ typ arg; ty_res ] in
         (* Unify it with the function's type. *)
-        unify (typ fn) ty_arr;
+        unify env (typ fn) ty_arr;
         (* Return the result type. *)
         TEApp (fn, arg, ty_res)
     | ELam (param, body) ->
@@ -624,7 +622,7 @@ module HM_SP () = struct
         let tc = lookup_tycon tname env in
         (* Instantiate the type constructor into a type with fresh unbound
            variables. *)
-        let ty_app =
+        let ty_dec =
           (* No type parameters, so all we need is the type name. *)
           if List.is_empty tc.type_params then TyName tc.name
           else
@@ -634,9 +632,6 @@ module HM_SP () = struct
               (TyName tc.name
               :: List.map tc.type_params ~f:(fun _ -> fresh_unbound_var ()))
         in
-        (* Apply the type application to get a concrete record type that we can
-           unify *)
-        let ty_dec = apply_type env ty_app in
         (* Infer the types of all the fields in the literal. *)
         let rec_lit = List.map ~f:(fun (id, x) -> (id, infer env x)) rec_lit in
         (* Synthesize a record type with the types of those fields. *)
@@ -644,9 +639,9 @@ module HM_SP () = struct
           TyRecord (tname, List.map ~f:(fun (id, x) -> (id, typ x)) rec_lit)
         in
         (* Unify that with the declared type. *)
-        unify ty_dec ty_rec;
+        unify env ty_dec ty_rec;
         (* Return the the type application representation. *)
-        TERecord (tname, rec_lit, ty_app)
+        TERecord (tname, rec_lit, ty_dec)
     | EProj (rcd, fld) -> (
         (* Infer the type of the expression we're projecting on. *)
         let rcd = infer env rcd in
@@ -662,11 +657,11 @@ module HM_SP () = struct
     | EIf (cond, thn, els) ->
         (* Check that the type of condition is Bool. *)
         let cond = infer env cond in
-        unify (typ cond) TyBool;
+        unify env (typ cond) TyBool;
         (* Check that the types of the branches are equal to each other. *)
         let thn = infer env thn in
         let els = infer env els in
-        unify (typ thn) (typ els);
+        unify env (typ thn) (typ els);
         (* Return the type of one of the branches. (we'll pick the "then"
            branch) *)
         TEIf (cond, thn, els, typ thn)
@@ -676,13 +671,13 @@ module HM_SP () = struct
         (* If there's a type annotation on this let binding, instantiate it. *)
         let ty_rhs =
           match ann with
-          | Some ann -> inst ann
+          | Some ann -> inst env ann
           | None -> fresh_unbound_var ()
         in
         (* Infer the type of the right-hand-side. *)
         let rhs = infer env rhs in
         (* Unify it with the annotated type. *)
-        unify ty_rhs (typ rhs);
+        unify env ty_rhs (typ rhs);
         (* Decrement the nesting level after this let binding. *)
         leave_level ();
         (* Generalize the type of the inferred binding, and add it to our
@@ -714,7 +709,7 @@ module HM_SP () = struct
                  variables are instantiated at the current level. *)
               let ty_decl =
                 match ann with
-                | Some ann -> inst ann
+                | Some ann -> inst env ann
                 | None -> fresh_unbound_var ()
               in
               (* Extend the environment by prepending the binding and its
@@ -728,7 +723,7 @@ module HM_SP () = struct
          fun (id, bind) (_, ann, rhs) ->
           let ty_bind = expect_varbind bind in
           let rhs = infer env' rhs in
-          unify ty_bind.ty (typ rhs);
+          unify env' ty_bind.ty (typ rhs);
           (* It's safe to do .ty because ty_bind is not generalized. *)
           (id, ann, rhs)
         in

@@ -314,72 +314,6 @@ module HM () = struct
     in
     inst' qty.ty
 
-  (* Occurs check: check if a type variable occurs in a type. If it does, raise
-     an exception. Otherwise, update the type variable's level to be the minimum
-     of its current level and the type's level. *)
-  let rec occurs (src : tv ref) (ty : ty) : unit =
-    (* Follow all the links. If we see a type variable, it will only be
-       Unbound. *)
-    match force ty with
-    | TyVar tgt when phys_equal src tgt ->
-        (* src type variable occurs in ty. *)
-        raise OccursCheck
-    | TyVar tgt ->
-        (* Grab src and tgt's levels. *)
-        let _, src_lvl = expect_unbound src in
-        let id, tgt_lvl = expect_unbound tgt in
-        (* Compute the minimum of their levels (the outermost scope). *)
-        let min_lvl = min src_lvl tgt_lvl in
-        (* Update the tgt's level to be the minimum. *)
-        tgt := Unbound (id, min_lvl)
-    | TyArrow arr ->
-        (* Check that src occurs in the arrow type. *)
-        List.iter arr ~f:(fun t -> occurs src t)
-    | TyApp app ->
-        (* Check that src occurs in the type application. *)
-        List.iter app ~f:(fun t -> occurs src t)
-    | TyRecord (_, flds) ->
-        (* Check that src occurs in the field types. *)
-        List.iter ~f:(fun (_, ty) -> occurs src ty) flds
-    | _ -> ()
-
-  (* Unify two types. If they are not unifiable, raise an exception. *)
-  let rec unify (t1 : ty) (t2 : ty) : unit =
-    (* Follow all the links. If we see any type variables, they will only be
-       Unbound. *)
-    let t1, t2 = (force t1, force t2) in
-    match (t1, t2) with
-    | _ when equal t1 t2 ->
-        () (* The types are trivially equal (e.g. TyBool). *)
-    | TyVar tv, ty | ty, TyVar tv ->
-        (* If either type is a type variable, ensure that the type variable does
-           not occur in the type. Update the levels while you're at it. *)
-        occurs tv ty;
-        (* Link the type variable to the type. *)
-        tv := Link ty
-    | TyArrow arr1, TyArrow arr2 when List.length arr1 = List.length arr2 ->
-        (* If both types are function types, unify their corresponding types
-           with each other. *)
-        List.iter2_exn arr1 arr2 ~f:unify
-    (* unify f1 f2; unify d1 d2 *)
-    | TyRecord (id1, fds1), TyRecord (id2, fds2)
-      when equal id1 id2 && equal (List.length fds1) (List.length fds2) ->
-        (* Both types are records with the same name and number of fields. *)
-        let unify_fld (id1, ty1) (id2, ty2) =
-          if not (equal id1 id2) then raise (unify_failed ty1 ty2)
-          else unify ty1 ty2
-        in
-        (* Unify their corresponding fields. *)
-        List.iter2_exn ~f:unify_fld fds1 fds2
-    | TyApp app1, TyApp app2 when List.length app1 = List.length app2 ->
-        (* If both types are type applications, unify their corresponding types
-           with each other. *)
-        List.iter2_exn app1 app2 ~f:unify
-    | TyName a, TyName b when equal a b -> () (* The type names are the same. *)
-    | _ ->
-        (* Unification has failed. *)
-        raise (unify_failed t1 t2)
-
   (* Perform a type application to get the underlying record type. We only need
      to apply the top-level, so that we can project and unify the record
      type. *)
@@ -409,6 +343,74 @@ module HM () = struct
           { type_params = tc.type_params; ty = TyRecord (tc.name, tc.ty) }
     | _ -> failwith "expected TyName or TyApp"
 
+  (* Occurs check: check if a type variable occurs in a type. If it does, raise
+     an exception. Otherwise, update the type variable's level to be the minimum
+     of its current level and the type's level. *)
+  let rec occurs (env : env) (src : tv ref) (ty : ty) : unit =
+    (* Follow all the links. If we see a type variable, it will only be
+       Unbound. *)
+    match force ty with
+    | TyVar tgt when phys_equal src tgt ->
+        (* src type variable occurs in ty. *)
+        raise OccursCheck
+    | TyVar tgt ->
+        (* Grab src and tgt's levels. *)
+        let _, src_lvl = expect_unbound src in
+        let id, tgt_lvl = expect_unbound tgt in
+        (* Compute the minimum of their levels (the outermost scope). *)
+        let min_lvl = min src_lvl tgt_lvl in
+        (* Update the tgt's level to be the minimum. *)
+        tgt := Unbound (id, min_lvl)
+    | TyArrow arr ->
+        (* Check that src occurs in the arrow type. *)
+        List.iter arr ~f:(fun t -> occurs env src t)
+    | TyApp app ->
+        (* Check that src occurs in the type application. *)
+        List.iter app ~f:(fun t -> occurs env src t)
+    | TyRecord (_, flds) ->
+        (* Check that src occurs in the field types. *)
+        List.iter ~f:(fun (_, ty) -> occurs env src ty) flds
+    | _ -> ()
+
+  (* Unify two types. If they are not unifiable, raise an exception. *)
+  let rec unify (env : env) (t1 : ty) (t2 : ty) : unit =
+    (* Follow all the links. If we see any type variables, they will only be
+       Unbound. *)
+    let t1, t2 = (force t1, force t2) in
+    match (t1, t2) with
+    | _ when equal t1 t2 ->
+        () (* The types are trivially equal (e.g. TyBool). *)
+    | TyVar tv, ty | ty, TyVar tv ->
+        (* If either type is a type variable, ensure that the type variable does
+           not occur in the type. Update the levels while you're at it. *)
+        occurs env tv ty;
+        (* Link the type variable to the type. *)
+        tv := Link ty
+    | TyArrow arr1, TyArrow arr2 when List.length arr1 = List.length arr2 ->
+        (* If both types are function types, unify their corresponding types
+           with each other. *)
+        List.iter2_exn arr1 arr2 ~f:(unify env)
+    (* unify f1 f2; unify d1 d2 *)
+    | TyRecord (id1, fds1), TyRecord (id2, fds2)
+      when equal id1 id2 && equal (List.length fds1) (List.length fds2) ->
+        (* Both types are records with the same name and number of fields. *)
+        let unify_fld (id1, ty1) (id2, ty2) =
+          if not (equal id1 id2) then raise (unify_failed ty1 ty2)
+          else unify env ty1 ty2
+        in
+        (* Unify their corresponding fields. *)
+        List.iter2_exn ~f:unify_fld fds1 fds2
+    | TyApp app1, TyApp app2 when List.length app1 = List.length app2 ->
+        (* If both types are type applications, unify their corresponding types
+           with each other. *)
+        List.iter2_exn app1 app2 ~f:(unify env)
+    | (TyApp _ as app), other | other, (TyApp _ as app) ->
+        unify env (apply_type env app) other
+    | TyName a, TyName b when equal a b -> () (* The type names are the same. *)
+    | _ ->
+        (* Unification has failed. *)
+        raise (unify_failed t1 t2)
+
   let rec infer (env : env) (exp : exp) : texp =
     match exp with
     | EBool b -> TEBool (b, TyBool) (* A true/false value is of type Bool. *)
@@ -429,7 +431,7 @@ module HM () = struct
         let ty_res = fresh_unbound_var () in
         let ty_arr = TyArrow [ typ arg; ty_res ] in
         (* Unify it with the function's type. *)
-        unify (typ fn) ty_arr;
+        unify env (typ fn) ty_arr;
         (* Return the result type. *)
         TEApp (fn, arg, ty_res)
     | ELam (param, body) ->
@@ -447,7 +449,7 @@ module HM () = struct
         let tc = lookup_tycon tname env in
         (* Instantiate the type constructor into a type with fresh unbound
            variables. *)
-        let ty_app =
+        let ty_dec =
           (* No type parameters, so all we need is the type name. *)
           if List.is_empty tc.type_params then TyName tc.name
           else
@@ -457,9 +459,6 @@ module HM () = struct
               (TyName tc.name
               :: List.map tc.type_params ~f:(fun _ -> fresh_unbound_var ()))
         in
-        (* Apply the type application to get a concrete record type that we can
-           unify *)
-        let ty_dec = apply_type env ty_app in
         (* Infer the types of all the fields in the literal. *)
         let rec_lit = List.map ~f:(fun (id, x) -> (id, infer env x)) rec_lit in
         (* Synthesize a record type with the types of those fields. *)
@@ -467,9 +466,9 @@ module HM () = struct
           TyRecord (tname, List.map ~f:(fun (id, x) -> (id, typ x)) rec_lit)
         in
         (* Unify that with the declared type. *)
-        unify ty_dec ty_rec;
+        unify env ty_dec ty_rec;
         (* Return the the type application representation. *)
-        TERecord (tname, rec_lit, ty_app)
+        TERecord (tname, rec_lit, ty_dec)
     | EProj (rcd, fld) -> (
         (* Infer the type of the expression we're projecting on. *)
         let rcd = infer env rcd in
@@ -485,11 +484,11 @@ module HM () = struct
     | EIf (cond, thn, els) ->
         (* Check that the type of condition is Bool. *)
         let cond = infer env cond in
-        unify (typ cond) TyBool;
+        unify env (typ cond) TyBool;
         (* Check that the types of the branches are equal to each other. *)
         let thn = infer env thn in
         let els = infer env els in
-        unify (typ thn) (typ els);
+        unify env (typ thn) (typ els);
         (* Return the type of one of the branches. (we'll pick the "then"
            branch) *)
         TEIf (cond, thn, els, typ thn)
@@ -505,7 +504,7 @@ module HM () = struct
         (* Infer the type of the right-hand-side. *)
         let rhs = infer env rhs in
         (* Unify it with the annotated type. *)
-        unify ty_rhs (typ rhs);
+        unify env ty_rhs (typ rhs);
         (* Decrement the nesting level after this let binding. *)
         leave_level ();
         (* Generalize the type of the inferred binding, and add it to our
@@ -551,7 +550,7 @@ module HM () = struct
          fun (id, bind) (_, ann, rhs) ->
           let ty_bind = expect_varbind bind in
           let rhs = infer env' rhs in
-          unify ty_bind.ty (typ rhs);
+          unify env' ty_bind.ty (typ rhs);
           (* It's safe to do .ty because ty_bind is not generalized. *)
           (id, ann, rhs)
         in
@@ -708,6 +707,7 @@ let%test "7" =
 *)
 let%test "8" =
   let open HM () in
+  Stdio.print_endline "8";
   let prog =
     ( [ { name = "box"; type_params = [ "'a" ]; ty = [ ("x", TyName "'a") ] } ],
       ELet
@@ -751,3 +751,32 @@ let%test "10" =
   let x = typecheck_prog ([], fix) in
   let t = typ x in
   Poly.equal (ty_pretty t) "(('4 -> '4) -> '4)"
+
+(*= 11.
+  type box 'a = { x: 'a }
+  let f = fun v ->
+    let r = box{x = box{x = v}}
+    in r.x
+  in f
+*)
+let%test "11" =
+  let open HM () in
+  let prog =
+    ( [ { name = "box"; type_params = [ "'a" ]; ty = [ ("x", TyName "'a") ] } ],
+      ELet
+        ( ( "f",
+            None,
+            ELam
+              ( "v",
+                ELet
+                  ( ( "r",
+                      None,
+                      ERecord
+                        ("box", [ ("x", ERecord ("box", [ ("x", EVar "v") ])) ])
+                    ),
+                    EProj (EVar "r", "x") ) ) ),
+          EVar "f" ) )
+  in
+  let x = typecheck_prog prog in
+  let t = typ x in
+  Poly.equal (ty_pretty t) "('5 -> box '5)"
