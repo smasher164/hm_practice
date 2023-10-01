@@ -396,24 +396,18 @@ module HM_SP () = struct
 
   let add_trait : constraint_set -> id -> id -> unit =
    fun cnt_set tyvar_id trait_name ->
-    let set =
-      Hashtbl.find_or_add cnt_set tyvar_id ~default:(fun () ->
-          Hash_set.create (module String))
-    in
+    let set = find_cset cnt_set tyvar_id in
     Hash_set.add set trait_name
 
-  let union_traits : constraint_set -> ty -> id Hash_set.t -> unit =
-   fun cset_dst ty cset_src ->
-    let tyvar_id =
+  let union_traits : constraint_set -> id -> id Hash_set.t -> unit =
+   fun cset_dst tyvar_id cset_src ->
+    (*= let tyvar_id =
       match ty with
       | TyVar { contents = Unbound (id, _) } -> id
       | _ -> failwith "TODO"
-    in
-    let set =
-      Hashtbl.find_or_add cset_dst tyvar_id ~default:(fun () ->
-          Hash_set.create (module String))
-    in
-    Hash_set.iter cset_src ~f:(fun trait_name -> Hash_set.add set trait_name)
+    in *)
+    let set = find_cset cset_dst tyvar_id in
+    Hash_set.iter cset_src ~f:(Hash_set.add set)
 
   let build_cset (env : env) (qty : qty) : constraint_set =
     ignore env;
@@ -426,11 +420,26 @@ module HM_SP () = struct
         | _ -> failwith "unreachable");
     cset
 
+  let propagateTy (env : env) (trait_name : id) (ty : ty) : unit =
+    (*= TODO:
+       s = findInstanceContext trait_name ty
+       List.iter s.traitSet ~f:(fun trs -> List.iter (args ty) ~f:(fun ta -> propagateTraits env trs ta)) *)
+    ()
+
+  let propagateTraits : env -> id Hash_set.t -> ty -> unit =
+   fun env traits ty ->
+    match ty with
+    | TyVar { contents = Unbound (tyvar_id, _) } ->
+        union_traits constraint_set tyvar_id traits
+    | _ -> Hash_set.iter traits ~f:(fun c -> propagateTy env c ty)
+
   let propagate : env -> constraint_set -> id -> ty -> unit =
    fun env cset id tv ->
     ignore env;
     match Hashtbl.find cset id with
-    | Some traits -> union_traits constraint_set tv traits
+    | Some traits ->
+        (* findInstanceContext for tv *)
+        propagateTraits env traits tv
     | None -> ()
 
   (* Instantiate a quantified type by replacing all the quantified type
@@ -443,6 +452,8 @@ module HM_SP () = struct
       | None -> create_table_for_type_params qty.type_params
       | Some tbl -> tbl
     in
+    (* reverse index of (trait_name, ty) list, i.e. tyvar_id -> trait_name
+       list *)
     let cset : constraint_set = build_cset env qty in
     (*= for each cnt in qty.constraints
           for ty_par_id in instanceLookupSimplify cnt
