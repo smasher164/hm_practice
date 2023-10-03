@@ -420,11 +420,25 @@ module HM_SP () = struct
         | _ -> failwith "unreachable");
     cset
 
+  let findInstanceContext env trait_name ty =
+    let td : trait_decl = lookup_trait trait_name env in
+    (* look for instances in td.instances that match ty *)
+    match List.find td.instances ~f:(fun ins -> true) with
+    | Some (qty, _) ->
+        build_cset env qty
+        (* maybe this qty is then passed to propagate? or we build a cset from
+           it? *)
+        (* found the instance. if the instance has any predicates, we apply
+           them. *)
+    | None -> failwith "TODO: better error message for \"no such instance\""
+
   let propagateTy (env : env) (trait_name : id) (ty : ty) : unit =
-    (*= TODO:
-       s = findInstanceContext trait_name ty
+    let cset = findInstanceContext env trait_name ty in
+    List.iter cset
+      (*= TODO:
+       s = findInstanceContext env trait_name ty
        List.iter s.traitSet ~f:(fun trs -> List.iter (args ty) ~f:(fun ta -> propagateTraits env trs ta)) *)
-    ()
+      TODO
 
   let propagateTraits : env -> id Hash_set.t -> ty -> unit =
    fun env traits ty ->
