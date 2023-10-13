@@ -1,0 +1,16 @@
+{
+    // Use IntelliSense to learn about possible attributes.
+    // Hover to view descriptions of existing attributes.
+    // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "OCaml earlybird (experimental)",
+            "type": "ocaml.earlybird",
+            "request": "launch",
+            "program": "/home/akhil/Projects/hm_practice/_build/default/lib/.hm_practice.inline-tests/inline_test_runner_hm_practice.bc",
+            "arguments": ["inline-test-runner", "hm_practice", "-source-tree-root", "..", "-diff-cmd", "-"],
+            "stopOnEntry": true
+        }
+    ]
+}

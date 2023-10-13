@@ -32,6 +32,7 @@
             base
             core
             stdio
+            earlybird
           ];
         };
       });

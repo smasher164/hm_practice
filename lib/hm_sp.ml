@@ -281,25 +281,6 @@ module HM_SP () = struct
     | TELet (_, _, ty) -> ty
     | TELetRec (_, _, ty) -> ty
 
-  let overlap (a : qty) (b : qty) : bool =
-    let rec overlap' (x : ty) (y : ty) : bool =
-      match (x, y) with
-      | _ when equal x y -> true
-      | TyName id, _ when List.mem a.type_params id ~equal -> true
-      | _, TyName id when List.mem b.type_params id ~equal -> true
-      | TyName x, TyName y -> equal x y
-      | TyApp app1, TyApp app2 -> List.for_all2_exn app1 app2 ~f:overlap'
-      | TyArrow arr1, TyArrow arr2 -> List.for_all2_exn arr1 arr2 ~f:overlap'
-      | _ -> false
-    in
-    overlap' a.ty b.ty
-
-  let add_instance trait_name ins_list (ins_qty, _) =
-    List.iter ins_list ~f:(fun qty ->
-        if overlap qty ins_qty then
-          raise (overlapping_instance trait_name ins_qty));
-    ins_qty :: ins_list
-
   (*= let add_instance impl ((trait_name, qty, _) as ins) =
     let l = Hashtbl.find_or_add impl.tbl trait_name ~default:(fun () -> []) in
     List.iter l ~f:(fun ty ->
@@ -416,50 +397,56 @@ module HM_SP () = struct
         match ty with
         | TyVar { contents = Unbound (tyvar_id, _) } ->
             add_trait cset tyvar_id trait_name
+            (* also check if ty_name is in type_params *)
+            (* if ty is more complicated, may want to simplify *)
         | TyName ty_name -> add_trait cset ty_name trait_name
         | _ -> failwith "unreachable");
     cset
 
-  let findInstanceContext env trait_name ty =
+  let rec find_instance (env : env) (trait_name : id) (ty : ty) =
     let td : trait_decl = lookup_trait trait_name env in
     (* look for instances in td.instances that match ty *)
     match List.find td.instances ~f:(fun ins -> true) with
     | Some (qty, _) ->
-        build_cset env qty
+        qty
+        (* build_cset env qty *)
         (* maybe this qty is then passed to propagate? or we build a cset from
            it? *)
         (* found the instance. if the instance has any predicates, we apply
            them. *)
     | None -> failwith "TODO: better error message for \"no such instance\""
 
-  let propagateTy (env : env) (trait_name : id) (ty : ty) : unit =
-    let cset = findInstanceContext env trait_name ty in
-    List.iter cset
-      (*= TODO:
+  and propagate_ty (env : env) (trait_name : id) (ty : ty) : unit =
+    let qty = find_instance env trait_name ty in
+    unify env (inst env qty) ty
+  (* () *)
+  (* let cset = findInstanceContext env trait_name ty in *)
+  (* List.iter cset *)
+  (*= TODO:
        s = findInstanceContext env trait_name ty
        List.iter s.traitSet ~f:(fun trs -> List.iter (args ty) ~f:(fun ta -> propagateTraits env trs ta)) *)
-      TODO
+  (* TODO *)
 
-  let propagateTraits : env -> id Hash_set.t -> ty -> unit =
+  and propagate_traits : env -> id Hash_set.t -> ty -> unit =
    fun env traits ty ->
     match ty with
     | TyVar { contents = Unbound (tyvar_id, _) } ->
         union_traits constraint_set tyvar_id traits
-    | _ -> Hash_set.iter traits ~f:(fun c -> propagateTy env c ty)
+    | _ -> Hash_set.iter traits ~f:(fun c -> propagate_ty env c ty)
 
-  let propagate : env -> constraint_set -> id -> ty -> unit =
+  and propagate : env -> constraint_set -> id -> ty -> unit =
    fun env cset id tv ->
     ignore env;
     match Hashtbl.find cset id with
     | Some traits ->
         (* findInstanceContext for tv *)
-        propagateTraits env traits tv
+        propagate_traits env traits tv
     | None -> ()
 
   (* Instantiate a quantified type by replacing all the quantified type
      variables with fresh unbound type variables. Ensure that the same ID gets
      mapped to the same unbound type variable by using an (id, ty) Hashtbl. *)
-  let inst ?tbl (env : env) (qty : qty) : ty =
+  and inst ?tbl (env : env) (qty : qty) : ty =
     let tbl =
       (* If a hash table is provided, use it. Otherwise, create a new one. *)
       match tbl with
@@ -509,7 +496,7 @@ module HM_SP () = struct
   (* Perform a type application to get the underlying record type. We only need
      to apply the top-level, so that we can project and unify the record
      type. *)
-  let apply_type env ty =
+  and apply_type env ty =
     match ty with
     | TyName id ->
         (* Nothing to apply, just look up the type constructor, and return its
@@ -543,7 +530,7 @@ module HM_SP () = struct
   (* Occurs check: check if a type variable occurs in a type. If it does, raise
      an exception. Otherwise, update the type variable's level to be the minimum
      of its current level and the type's level. *)
-  let rec occurs (src : tv ref) (ty : ty) : unit =
+  and occurs (src : tv ref) (ty : ty) : unit =
     (* Follow all the links. If we see a type variable, it will only be
        Unbound. *)
     match force ty with
@@ -570,7 +557,7 @@ module HM_SP () = struct
     | _ -> ()
 
   (* Unify two types. If they are not unifiable, raise an exception. *)
-  let rec unify (env : env) (t1 : ty) (t2 : ty) : unit =
+  and unify (env : env) (t1 : ty) (t2 : ty) : unit =
     (* Follow all the links. If we see any type variables, they will only be
        Unbound. *)
     let t1, t2 = (force t1, force t2) in
@@ -601,12 +588,45 @@ module HM_SP () = struct
         (* If both types are type applications, unify their corresponding types
            with each other. *)
         List.iter2_exn app1 app2 ~f:(unify env)
-    | (TyApp _ as app), other | other, (TyApp _ as app) ->
-        unify env (apply_type env app) other
     | TyName a, TyName b when equal a b -> () (* The type names are the same. *)
     | _ ->
         (* Unification has failed. *)
         raise (unify_failed t1 t2)
+
+  let overlap (env : env) (a : qty) (b : qty) : bool =
+    let ia = inst env a in
+    let ib = inst env b in
+    try
+      unify env ia ib;
+      true
+    with UnificationFailure _ -> false
+
+  (*= let rec overlap' (x : ty) (y : ty) : bool =
+              match (x, y) with
+              | _ when equal x y -> true
+              | TyName id, _ when List.mem a.type_params id ~equal -> true
+              | _, TyName id when List.mem b.type_params id ~equal -> true
+              | TyName x, TyName y -> equal x y
+              | TyApp app1, TyApp app2 -> List.for_all2_exn app1 app2 ~f:overlap'
+              | TyArrow arr1, TyArrow arr2 -> List.for_all2_exn arr1 arr2 ~f:overlap'
+              | _ -> false
+            in
+            overlap' a.ty b.ty *)
+  let add_instance (env : env) trait_name ins_list (ins_qty, _) =
+    List.iter ins_list ~f:(fun qty ->
+        if overlap env qty ins_qty then
+          raise (overlapping_instance trait_name ins_qty));
+    ins_qty :: ins_list
+
+  let inst_tycon tc =
+    (* No type parameters, so all we need is the type name. *)
+    if List.is_empty tc.type_params then TyName tc.name
+    else
+      (* Map over the type parameters to build up a TyApp with fresh unbound
+         variables. *)
+      TyApp
+        (TyName tc.name
+        :: List.map tc.type_params ~f:(fun _ -> fresh_unbound_var ()))
 
   let rec infer (env : env) (exp : exp) : texp =
     match exp with
@@ -647,16 +667,10 @@ module HM_SP () = struct
         let tc = lookup_tycon tname env in
         (* Instantiate the type constructor into a type with fresh unbound
            variables. *)
-        let ty_dec =
-          (* No type parameters, so all we need is the type name. *)
-          if List.is_empty tc.type_params then TyName tc.name
-          else
-            (* Map over the type parameters to build up a TyApp with fresh
-               unbound variables. *)
-            TyApp
-              (TyName tc.name
-              :: List.map tc.type_params ~f:(fun _ -> fresh_unbound_var ()))
-        in
+        let ty_app = inst_tycon tc in
+        (* Apply the type application to get a concrete record type that we can
+           unify *)
+        let ty_dec = apply_type env ty_app in
         (* Infer the types of all the fields in the literal. *)
         let rec_lit = List.map ~f:(fun (id, x) -> (id, infer env x)) rec_lit in
         (* Synthesize a record type with the types of those fields. *)
@@ -666,7 +680,7 @@ module HM_SP () = struct
         (* Unify that with the declared type. *)
         unify env ty_dec ty_rec;
         (* Return the the type application representation. *)
-        TERecord (tname, rec_lit, ty_dec)
+        TERecord (tname, rec_lit, ty_app)
     | EProj (rcd, fld) -> (
         (* Infer the type of the expression we're projecting on. *)
         let rcd = infer env rcd in
@@ -856,7 +870,7 @@ module HM_SP () = struct
              | Ok () -> ()
              | Error _ -> raise (duplicate_definition td.name));
           ignore
-            (List.fold_left td.instances ~init:[] ~f:(add_instance td.name));
+            (List.fold_left td.instances ~init:[] ~f:(add_instance env td.name));
           (td.name, TraitBind td) :: prepend_defs td acc)
     in
     (* List.iter inl ~f:(fun ((trait_name, _, _) as ins) -> if not (Hash_set.mem
